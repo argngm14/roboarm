@@ -62,9 +62,18 @@ CELLS = range(1, 10)
 #              until the gripper has actually stopped moving (lower = faster)
 SPEEDS = {
     "test": {"travel": 700, "fine": 300, "accel": 20, "grip_wait": 0.7},   # teach mode uses this
-    "game": {"travel": 1500, "fine": 500, "accel": 50, "grip_wait": 0.5},  # raise once routes are tested
+    # travel 3000 = the course's default and about the servo's top speed at 12 V (~3070).
+    # accel 254 is the course default (the most aggressive); 150 is a bit gentler.
+    "game": {"travel": 3000, "fine": 1500, "accel": 150, "grip_wait": 0.5},
 }
 GRIP_SPEED = 1500
+
+# Corner cutting. Through "via" poses (aim, safe) the arm does not stop: it sends
+# the next pose as soon as every joint is within this many ticks of the current
+# one (150 ticks is about 13 degrees). It still stops fully where the gripper
+# acts (grab, place, knock) and at the end. Bigger = smoother and faster but
+# cuts corners more; 0 = stop at every pose like before.
+BLEND_TICKS = 150
 
 # During an attack the empty gripper closes to this saved grip first, so it goes
 # into the cell the same width as when it carried that block in. c2 = cube.
@@ -206,6 +215,7 @@ class Arm:
         self.grip_pos = pos[hw.GRIPPER]
         self.free = False        # True while arm torque is off for moving by hand
         self.holding = None      # block type in the gripper, or None
+        self._in_flight = False  # True right after a blended move (arm may still be moving)
 
     def set_speed(self, name):
         if name not in SPEEDS:
@@ -240,8 +250,12 @@ class Arm:
 
     # --- low level ---
 
-    def move(self, target, speed=None, accel=None):
-        """Move all 4 arm joints together and wait until they arrive."""
+    def move(self, target, speed=None, accel=None, blend=0):
+        """
+        Move all 4 arm joints together and wait until they arrive.
+        blend > 0: don't wait for a full stop; return once every joint is within
+        `blend` ticks, so the next move() carries straight on (one continuous motion).
+        """
         speed = speed or self.sp["travel"]
         accel = accel or self.sp["accel"]
         target = [int(round(x)) for x in target]
@@ -251,17 +265,27 @@ class Arm:
             raise ValueError("Outside joint limits, nothing moved: " + hw.describe(bad))
         if self.free:
             self.hold()
-        start = dict(zip(hw.ARM_JOINTS, self.current))
+        if self._in_flight:
+            # The last move was blended, so the arm isn't at its target yet: plan from where it is.
+            start = self.bus.read(hw.ARM_JOINTS)
+        else:
+            start = dict(zip(hw.ARM_JOINTS, self.current))
         speeds, accs, longest = synced_profile(start, goal, speed, accel)
         self.bus.send(goal, speeds, accs)
+        timeout = 3 + 2 * longest / speed
         try:
-            self.bus.wait(hw.ARM_JOINTS, timeout=3 + 2 * longest / speed)
+            if blend:
+                self.bus.wait_near(hw.ARM_JOINTS, goal, blend, timeout)
+            else:
+                self.bus.wait(hw.ARM_JOINTS, timeout=timeout)
         except (hw.StopPressed, RuntimeError):
             # Stopped partway: remember where the arm actually is.
             pos = self.bus.read(hw.ARM_JOINTS)
             self.current = [pos[n] for n in hw.ARM_JOINTS]
+            self._in_flight = False
             raise
         self.current = target
+        self._in_flight = bool(blend)
 
     def set_gripper(self, position, wait=True):
         """
@@ -283,11 +307,12 @@ class Arm:
 
     # --- named poses ---
 
-    def go(self, name, kind="travel"):
+    def go(self, name, kind="travel", blend=False):
+        """blend=True: pass through this pose without stopping (see BLEND_TICKS)."""
         if name not in self.poses["arm"]:
             raise KeyError(f"No arm pose called '{name}' saved yet")
         print(f"  -> {name}")
-        self.move(self.poses["arm"][name], self.sp[kind])
+        self.move(self.poses["arm"][name], self.sp[kind], blend=BLEND_TICKS if blend else 0)
 
     def grip(self, name):
         if name not in self.poses["grip"]:
@@ -341,19 +366,20 @@ class Arm:
 
     # --- the actual task ---
 
-    def pick(self, block):
+    def pick(self, block, stop_at_end=True):
+        """stop_at_end=False: leave the arm still moving into 'safe' (pick_and_place carries on)."""
         b = f"b{block}"
         n = TYPE_NUMBER[self.block_type(block)]
         self.check_unused(block)
         self.check(["safe", f"{b}_a", f"{b}_g"], [f"o{n}", f"c{n}"])
         self.grip(f"o{n}")
-        self.go(f"{b}_a", "travel")
-        self.go(f"{b}_g", "fine")
+        self.go(f"{b}_a", "travel", blend=True)
+        self.go(f"{b}_g", "fine")                      # full stop: the gripper closes here
         self.grip(f"c{n}")
         if self.track:
             self.tracker.mark(block)   # it's off its plate now
-        self.go(f"{b}_a", "fine")
-        self.go("safe", "travel")
+        self.go(f"{b}_a", "fine", blend=True)
+        self.go("safe", "travel", blend=not stop_at_end)
 
     def check_unused(self, block):
         if self.track and self.tracker.is_used(block):
@@ -367,10 +393,10 @@ class Arm:
         aim = self.cell_pose(cell, "a", self.holding)
         put = self.cell_pose(cell, "p", self.holding)
         self.check(["safe", aim, put], [f"o{n}"])
-        self.go(aim, "travel")
-        self.go(put, "fine")
+        self.go(aim, "travel", blend=True)
+        self.go(put, "fine")                           # full stop: the gripper opens here
         self.grip(f"o{n}")
-        self.go(aim, "fine")
+        self.go(aim, "fine", blend=True)
         self.go("safe", "travel")
 
     def check_route(self, block, cell):
@@ -389,7 +415,7 @@ class Arm:
         self.check_route(block, cell)
         print(f"block {block} ({btype}) -> cell {cell}   [{self.speed_name} speed, Space = stop]")
         self.go("safe", "travel")
-        self.pick(block)
+        self.pick(block, stop_at_end=False)   # flows straight into place: no stop at safe
         self.place(cell)
 
     def attack(self, cell):
@@ -410,9 +436,9 @@ class Arm:
         self.go("safe", "travel")
         self.grip(ATTACK_GRIP)
         self.holding = None            # closed, but nothing in it
-        self.go(aim, "travel")
-        self.go(knock, "fine")
-        self.go(aim, "fine")
+        self.go(aim, "travel", blend=True)
+        self.go(knock, "fine")                         # full stop: reach the full knock depth
+        self.go(aim, "fine", blend=True)
         self.go("safe", "travel")
 
 

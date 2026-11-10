@@ -194,6 +194,40 @@ class LiveBus:
                         "Move took too long, so the arm may be blocked. Stopped and holding."
                     )
 
+    def wait_near(self, names, target, tol, timeout):
+        """
+        Wait only until every joint is within `tol` ticks of `target`, not until it
+        has stopped, so the next move can carry straight on. Space still stops and holds.
+        A garbled reply is skipped (the arm is moving fast); several in a row stop the arm.
+        """
+        start = time.monotonic()
+        keys = _NoKeys()
+        if self.RawTerminal is not None and sys.stdin.isatty():
+            keys = self.RawTerminal()
+        bad_reads = 0
+        with keys as term:
+            while True:
+                key = term.read_key(0.005)
+                if key in (" ", "\x03"):
+                    self.hold(names)
+                    raise StopPressed()
+                try:
+                    pos = self.read(names)
+                    bad_reads = 0
+                except RuntimeError:
+                    bad_reads += 1
+                    if bad_reads >= 5:
+                        self.hold(names)
+                        raise
+                    continue
+                if max(abs(pos[n] - target[n]) for n in names) <= tol:
+                    return
+                if time.monotonic() - start > timeout:
+                    self.hold(names)
+                    raise RuntimeError(
+                        "Move took too long, so the arm may be blocked. Stopped and holding."
+                    )
+
     def wait_settled(self, name, min_time, max_time=2.0, still_ticks=3):
         """
         Wait until one motor stops moving. Used for the gripper: when it squeezes
@@ -251,6 +285,9 @@ class DryBus:
         return self.read(names)
 
     def wait(self, names, timeout):
+        pass
+
+    def wait_near(self, names, target, tol, timeout):
         pass
 
     def wait_settled(self, name, min_time, max_time=2.0, still_ticks=3):
