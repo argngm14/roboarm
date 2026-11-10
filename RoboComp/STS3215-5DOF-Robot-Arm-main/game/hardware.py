@@ -40,11 +40,12 @@ ALL_JOINTS = ARM_JOINTS + (GRIPPER,)
 #     outside the limits is refused before anything moves
 #   - saving a pose outside the limits gives a warning
 JOINT_LIMITS = {
-    "base_yaw": (0, 4095),   # motor 1
-    "shoulder": (0, 4095),   # motor 2
-    "elbow":    (0, 4095),   # motor 3
-    "wrist":    (0, 4095),   # motor 4
-    "gripper":  (0, 4095),   # motor 5
+    "base_yaw": (500, 3500),   # motor 1: right (R) 500 ... left (L) 3500
+    "shoulder": (1300, 2800),  # motor 2: forward (F) 1300 ... back (B) 2800
+                               # NOTE: shoulder range depends on elbow position (to be adjusted)
+    "elbow":    (1000, 3000),  # motor 3: down (D) 1000 ... up (U) 3000
+    "wrist":    (1000, 3000),  # motor 4: down (D) 1000 ... up (U) 3000
+    "gripper":  (1300, 3000),  # motor 5: open (O) 1300 ... close (C) 3000
 }
 
 for _name, (_lo, _hi) in JOINT_LIMITS.items():
