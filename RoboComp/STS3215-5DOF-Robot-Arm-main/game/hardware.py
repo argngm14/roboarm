@@ -123,9 +123,23 @@ class LiveBus:
         """Actual positions reported by the servos (raw ticks 0-4095)."""
         return {n: self.h.read_servo(self.ph, self._id(n)) for n in names}
 
+    def _drain(self):
+        """Pause briefly and throw away stray bytes (e.g. left over from the
+        previous move packet), so the next reply is not garbled."""
+        time.sleep(0.02)
+        try:
+            self.port.ser.reset_input_buffer()
+        except Exception:
+            pass
+
     def torque(self, names, on):
+        # Torque on/off is safe to repeat, so retry if the reply is garbled.
         for n in names:
-            result, error = self.ph.write1ByteTxRx(self._id(n), self.TORQUE_ADDR, 1 if on else 0)
+            for _attempt in range(3):
+                self._drain()
+                result, error = self.ph.write1ByteTxRx(self._id(n), self.TORQUE_ADDR, 1 if on else 0)
+                if result == self.COMM_SUCCESS:
+                    break
             self.h.check_result(self.ph, result, error, f"Torque {'on' if on else 'off'} for {n}")
 
     def send(self, targets, speeds, accs):
