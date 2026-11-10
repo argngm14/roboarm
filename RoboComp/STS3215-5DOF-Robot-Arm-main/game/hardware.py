@@ -1,0 +1,249 @@
+"""
+hardware.py - the only file that talks to the motors.
+
+It uses the course code (arm_helpers.py, arm_settings.py, scservo_sdk/)
+from the STS3215-5DOF-Robot-Arm folder. Put this "game" folder INSIDE that
+folder:
+
+    STS3215-5DOF-Robot-Arm/
+        arm_helpers.py, arm_settings.py, scservo_sdk/, scripts/, ...
+        game/
+            hardware.py   arm.py   teach.py   poses.json
+
+Serial port, servo IDs and baud rate still come from arm_settings.py.
+"""
+
+import sys
+import time
+from pathlib import Path
+
+# Practice mode: True = never touch the motors, just run the logic.
+# Leave True while practising on your laptop.
+# Set to False on the Raspberry Pi.
+DRY_RUN = False
+
+ARM_JOINTS = ("base_yaw", "shoulder", "elbow", "wrist")
+GRIPPER = "gripper"
+ALL_JOINTS = ARM_JOINTS + (GRIPPER,)
+
+# ---------------------------------------------------------------- JOINT LIMITS
+# Allowed range for each motor, in raw ticks (min, max).
+#
+# 0-4095 is the servo's full turn, but the arm and gripper hit their mechanical
+# stops well before that. Record each joint's real range and enter it here.
+# Leave a small margin (about 30-50 ticks) inside each hard stop, so the motor
+# never ends up pushing against it.
+#
+# How limits are used:
+#   - teach mode: a set/nudge past a limit stops AT the limit (and tells you)
+#   - everything else (go, pick, place, run, arm.py): a move with any target
+#     outside the limits is refused before anything moves
+#   - saving a pose outside the limits gives a warning
+JOINT_LIMITS = {
+    "base_yaw": (0, 4095),   # motor 1
+    "shoulder": (0, 4095),   # motor 2
+    "elbow":    (0, 4095),   # motor 3
+    "wrist":    (0, 4095),   # motor 4
+    "gripper":  (0, 4095),   # motor 5
+}
+
+for _name, (_lo, _hi) in JOINT_LIMITS.items():
+    if not 0 <= _lo < _hi <= 4095:
+        raise ValueError(f"JOINT_LIMITS['{_name}'] = ({_lo}, {_hi}) must satisfy 0 <= min < max <= 4095")
+
+
+def outside_limits(targets):
+    """List of (joint, value, min, max) for every target outside its limit."""
+    bad = []
+    for name, value in targets.items():
+        lo, hi = JOINT_LIMITS[name]
+        if not lo <= value <= hi:
+            bad.append((name, value, lo, hi))
+    return bad
+
+
+def clamp(name, value):
+    lo, hi = JOINT_LIMITS[name]
+    return max(lo, min(hi, value))
+
+
+def describe(bad):
+    return ", ".join(f"{n} {v} (limit {lo}-{hi})" for n, v, lo, hi in bad)
+
+# ------------------------------------------------------------------------------
+
+# Pretend starting position, used only in practice mode.
+DRY_START = {name: 2048 for name in ALL_JOINTS}
+
+POLL_SECONDS = 0.02
+
+
+class StopPressed(Exception):
+    """Space was pressed during a move. The arm stopped and is holding still."""
+
+
+# ---------------------------------------------------------------- real arm
+
+class LiveBus:
+    def __init__(self):
+        repo = Path(__file__).resolve().parents[1]
+        if not (repo / "arm_helpers.py").exists():
+            raise RuntimeError(
+                f"Can't find arm_helpers.py in {repo}. Put the 'game' folder "
+                "inside the STS3215-5DOF-Robot-Arm folder."
+            )
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+
+        import arm_helpers
+        import arm_settings
+        from scservo_sdk import COMM_SUCCESS, SMS_STS_TORQUE_ENABLE
+
+        self.h = arm_helpers
+        self.s = arm_settings
+        self.COMM_SUCCESS = COMM_SUCCESS
+        self.TORQUE_ADDR = SMS_STS_TORQUE_ENABLE
+
+        missing = [n for n in ALL_JOINTS if n not in arm_settings.SERVO_IDS]
+        if missing:
+            raise RuntimeError(f"arm_settings.SERVO_IDS is missing: {missing}")
+
+        try:
+            from terminal_keys import RawTerminal
+            self.RawTerminal = RawTerminal
+        except ImportError:
+            self.RawTerminal = None
+
+        self.port, self.ph = arm_helpers.connect()
+
+    def _id(self, name):
+        return self.s.SERVO_IDS[name]
+
+    def read(self, names=ALL_JOINTS):
+        """Actual positions reported by the servos (raw ticks 0-4095)."""
+        return {n: self.h.read_servo(self.ph, self._id(n)) for n in names}
+
+    def torque(self, names, on):
+        for n in names:
+            result, error = self.ph.write1ByteTxRx(self._id(n), self.TORQUE_ADDR, 1 if on else 0)
+            self.h.check_result(self.ph, result, error, f"Torque {'on' if on else 'off'} for {n}")
+
+    def send(self, targets, speeds, accs):
+        """One synchronized packet. Each joint can have its own speed/acceleration."""
+        try:
+            for n, pos in targets.items():
+                pos = int(pos)
+                if not 0 <= pos <= 4095:
+                    raise ValueError(f"{n} position {pos} is outside 0-4095")
+                if not self.ph.SyncWritePosEx(self._id(n), pos, int(speeds[n]), int(accs[n])):
+                    raise RuntimeError(f"Could not add {n} to synchronized move")
+            result = self.ph.groupSyncWrite.txPacket()
+            if result != self.COMM_SUCCESS:
+                raise RuntimeError(self.ph.getTxRxResult(result))
+        finally:
+            self.ph.groupSyncWrite.clearParam()
+
+    def hold(self, names=ALL_JOINTS):
+        """Freeze where the arm is now: target = current position, torque on."""
+        pos = self.read(names)
+        self.send(pos, {n: 1000 for n in names}, {n: 50 for n in names})
+        self.torque(names, True)
+        return pos
+
+    def _any_moving(self, names):
+        for n in names:
+            moving, result, error = self.ph.ReadMoving(self._id(n))
+            self.h.check_result(self.ph, result, error, f"Read moving status for {n}")
+            if moving:
+                return True
+        return False
+
+    def wait(self, names, timeout):
+        """Wait for the move to finish. Space (or Ctrl+C) stops and holds."""
+        start = time.monotonic()
+        time.sleep(POLL_SECONDS)
+        keys = _NoKeys()
+        if self.RawTerminal is not None and sys.stdin.isatty():
+            keys = self.RawTerminal()
+        with keys as term:
+            while True:
+                key = term.read_key(POLL_SECONDS)
+                if key in (" ", "\x03"):
+                    self.hold(names)   # only the moving joints; gripper keeps its squeeze
+                    raise StopPressed()
+                if not self._any_moving(names):
+                    return
+                if time.monotonic() - start > timeout:
+                    self.hold(names)
+                    raise RuntimeError(
+                        "Move took too long, so the arm may be blocked. Stopped and holding."
+                    )
+
+    def wait_settled(self, name, min_time, max_time=2.0, still_ticks=3):
+        """
+        Wait until one motor stops moving. Used for the gripper: when it squeezes
+        a block it stops before reaching its target, so the servo's own 'moving'
+        flag can't be trusted, but its position stops changing either way.
+        """
+        start = time.monotonic()
+        last = self.read([name])[name]
+        still = 0
+        while True:
+            time.sleep(0.03)
+            pos = self.read([name])[name]
+            still = still + 1 if abs(pos - last) <= still_ticks else 0
+            last = pos
+            elapsed = time.monotonic() - start
+            if (still >= 3 and elapsed >= min_time) or elapsed >= max_time:
+                return
+
+    def close(self):
+        self.port.closePort()
+
+
+class _NoKeys:
+    """Used when there's no terminal to read Space from."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def read_key(self, timeout):
+        time.sleep(timeout)
+        return None
+
+
+# ---------------------------------------------------------------- practice mode
+
+class DryBus:
+    def __init__(self):
+        self.pos = dict(DRY_START)
+
+    def read(self, names=ALL_JOINTS):
+        return {n: self.pos[n] for n in names}
+
+    def torque(self, names, on):
+        pass
+
+    def send(self, targets, speeds, accs):
+        for n, p in targets.items():
+            if not 0 <= int(p) <= 4095:
+                raise ValueError(f"{n} position {p} is outside 0-4095")
+        self.pos.update({n: int(p) for n, p in targets.items()})
+
+    def hold(self, names=ALL_JOINTS):
+        return self.read(names)
+
+    def wait(self, names, timeout):
+        pass
+
+    def wait_settled(self, name, min_time, max_time=2.0, still_ticks=3):
+        pass
+
+    def close(self):
+        pass
+
+
+def open_bus():
+    return DryBus() if DRY_RUN else LiveBus()
