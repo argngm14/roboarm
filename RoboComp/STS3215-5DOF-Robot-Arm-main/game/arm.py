@@ -61,20 +61,21 @@ CELLS = range(1, 10)
 #   accel:  higher = snappier starts/stops, lower = gentler
 #   grip_wait: minimum seconds for the gripper to open/close; it also waits
 #              until the gripper has actually stopped moving (lower = faster)
-SPEEDS = {
-    "test": {"travel": 700, "fine": 300, "accel": 20, "grip_wait": 0.7},   # teach mode uses this
-    # travel 3000 = the course's default and about the servo's top speed at 12 V (~3070).
-    # accel 254 is the course default (the most aggressive); 150 is a bit gentler.
-    "game": {"travel": 3000, "fine": 1500, "accel": 150, "grip_wait": 0.5},
-}
-GRIP_SPEED = 1500
-
-# Corner cutting. Through "via" poses (aim, safe) the arm does not stop: it sends
-# the next pose as soon as every joint is within this many ticks of the current
+# Corner cutting ("blend"). Through "via" poses (aim, safe) the arm does not stop: it
+# sends the next pose as soon as every joint is within this many ticks of the current
 # one (150 ticks is about 13 degrees). It still stops fully where the gripper
 # acts (grab, place, knock) and at the end. Bigger = smoother and faster but
-# cuts corners more; 0 = stop at every pose like before.
+# cuts corners more; 0 = stop at every pose. Only the game speed blends; test
+# speed (teach mode's default) always stops at every pose, as before.
 BLEND_TICKS = 150
+
+SPEEDS = {
+    "test": {"travel": 700, "fine": 300, "accel": 20, "grip_wait": 0.7, "blend": 0},   # teach mode uses this
+    # travel 3000 = the course's default and about the servo's top speed at 12 V (~3070).
+    # accel 254 is the course default (the most aggressive); 150 is a bit gentler.
+    "game": {"travel": 3000, "fine": 1500, "accel": 150, "grip_wait": 0.5, "blend": BLEND_TICKS},
+}
+GRIP_SPEED = 1500
 
 # Timing printout for finding where the pauses are. Off normally; turn on with:
 #   ROBOARM_TRACE=1 python3 game.py
@@ -320,11 +321,11 @@ class Arm:
     # --- named poses ---
 
     def go(self, name, kind="travel", blend=False):
-        """blend=True: pass through this pose without stopping (see BLEND_TICKS)."""
+        """blend=True: pass through this pose without stopping, if this speed blends (see BLEND_TICKS)."""
         if name not in self.poses["arm"]:
             raise KeyError(f"No arm pose called '{name}' saved yet")
         print(f"  -> {name}")
-        self.move(self.poses["arm"][name], self.sp[kind], blend=BLEND_TICKS if blend else 0)
+        self.move(self.poses["arm"][name], self.sp[kind], blend=self.sp["blend"] if blend else 0)
 
     def grip(self, name):
         if name not in self.poses["grip"]:
