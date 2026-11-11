@@ -36,6 +36,7 @@ Same move at test speed:           python game/arm.py 2 5 test
 
 import json
 import os
+import time
 
 import hardware as hw
 
@@ -74,6 +75,10 @@ GRIP_SPEED = 1500
 # acts (grab, place, knock) and at the end. Bigger = smoother and faster but
 # cuts corners more; 0 = stop at every pose like before.
 BLEND_TICKS = 150
+
+# Timing printout for finding where the pauses are. Off normally; turn on with:
+#   ROBOARM_TRACE=1 python3 game.py
+TRACE = os.environ.get("ROBOARM_TRACE") == "1"
 
 # During an attack the empty gripper closes to this saved grip first, so it goes
 # into the cell the same width as when it carried that block in. c2 = cube.
@@ -271,6 +276,7 @@ class Arm:
         else:
             start = dict(zip(hw.ARM_JOINTS, self.current))
         speeds, accs, longest = synced_profile(start, goal, speed, accel)
+        t0 = time.monotonic()
         self.bus.send(goal, speeds, accs)
         timeout = 3 + 2 * longest / speed
         try:
@@ -286,6 +292,9 @@ class Arm:
             raise
         self.current = target
         self._in_flight = bool(blend)
+        if TRACE:
+            print(f"      {time.monotonic() - t0:.2f}s  {'blend' if blend else 'full stop'}"
+                  f"  ({longest} ticks, speed {speed}, accel {accel})")
 
     def set_gripper(self, position, wait=True):
         """
@@ -297,10 +306,13 @@ class Arm:
         bad = hw.outside_limits({hw.GRIPPER: position})
         if bad:
             raise ValueError("Outside gripper limit, nothing moved: " + hw.describe(bad))
+        t0 = time.monotonic()
         self.bus.send({hw.GRIPPER: position}, {hw.GRIPPER: GRIP_SPEED}, {hw.GRIPPER: self.sp["accel"]})
         self.grip_pos = position
         if wait:
             self.wait_gripper()
+            if TRACE:
+                print(f"      {time.monotonic() - t0:.2f}s  gripper wait")
 
     def wait_gripper(self, min_time=None):
         self.bus.wait_settled(hw.GRIPPER, self.sp["grip_wait"] if min_time is None else min_time)
