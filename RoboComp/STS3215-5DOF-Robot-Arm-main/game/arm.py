@@ -61,13 +61,16 @@ CELLS = range(1, 10)
 #   accel:  higher = snappier starts/stops, lower = gentler
 #   grip_wait: minimum seconds for the gripper to open/close; it also waits
 #              until the gripper has actually stopped moving (lower = faster)
-# Corner cutting ("blend"). Through "via" poses (aim, safe) the arm does not stop: it
-# sends the next pose as soon as every joint is within this many ticks of the current
-# one (150 ticks is about 13 degrees). It still stops fully where the gripper
-# acts (grab, place, knock) and at the end. Bigger = smoother and faster but
-# cuts corners more; 0 = stop at every pose. Only the game speed blends; test
-# speed (teach mode's default) always stops at every pose, as before.
+# Corner cutting ("blend"). The big moves (safe <-> aim) flow through "safe" without
+# stopping: the next pose is sent as soon as every joint is within this many ticks
+# of safe (150 ticks is about 13 degrees). Bigger = smoother and faster but cuts
+# corners more; 0 = never blend.
+# Aim <-> grab/place/knock is never blended: the arm stops fully at the aim pose,
+# waits AIM_PAUSE seconds, then goes in, so grabbing and placing stay controlled.
+# Only game.py turns blending on, and only at game speed. teach.py, arm.py and
+# test speed stop at every pose with no pause, as before.
 BLEND_TICKS = 150
+AIM_PAUSE = 0.2
 
 SPEEDS = {
     "test": {"travel": 700, "fine": 300, "accel": 20, "grip_wait": 0.7, "blend": 0},   # teach mode uses this
@@ -209,10 +212,11 @@ def synced_profile(start, target, speed, accel):
 # ---------------------------------------------------------------- the arm
 
 class Arm:
-    def __init__(self, speed="test", track=False):
+    def __init__(self, speed="test", track=False, blend=False):
         self.poses = load_poses()
         self.set_speed(speed)
         self.track = track                       # True in game.py: refuse to pick a used block
+        self.allow_blend = blend                 # True in game.py only (see BLEND_TICKS)
         self.tracker = BlockTracker() if track else None
         self.bus = hw.open_bus()
         # Hold wherever the arm is right now. Nothing moves on startup.
@@ -320,12 +324,22 @@ class Arm:
 
     # --- named poses ---
 
+    def blending(self):
+        """True only in game.py at game speed."""
+        return bool(self.allow_blend and self.sp["blend"])
+
     def go(self, name, kind="travel", blend=False):
-        """blend=True: pass through this pose without stopping, if this speed blends (see BLEND_TICKS)."""
+        """blend=True: pass through this pose without stopping, if blending is on (see BLEND_TICKS)."""
         if name not in self.poses["arm"]:
             raise KeyError(f"No arm pose called '{name}' saved yet")
         print(f"  -> {name}")
-        self.move(self.poses["arm"][name], self.sp[kind], blend=self.sp["blend"] if blend else 0)
+        self.move(self.poses["arm"][name], self.sp[kind],
+                  blend=self.sp["blend"] if blend and self.blending() else 0)
+
+    def aim_pause(self):
+        """Short still moment at the aim pose before going in to grab/place (blending only)."""
+        if self.blending():
+            time.sleep(AIM_PAUSE)
 
     def grip(self, name):
         if name not in self.poses["grip"]:
@@ -386,12 +400,13 @@ class Arm:
         self.check_unused(block)
         self.check(["safe", f"{b}_a", f"{b}_g"], [f"o{n}", f"c{n}"])
         self.grip(f"o{n}")
-        self.go(f"{b}_a", "travel", blend=True)
+        self.go(f"{b}_a", "travel")                    # full stop at aim, then a short pause
+        self.aim_pause()
         self.go(f"{b}_g", "fine")                      # full stop: the gripper closes here
         self.grip(f"c{n}")
         if self.track:
             self.tracker.mark(block)   # it's off its plate now
-        self.go(f"{b}_a", "fine", blend=True)
+        self.go(f"{b}_a", "fine")                      # full stop: straight up out of the plate
         self.go("safe", "travel", blend=not stop_at_end)
 
     def check_unused(self, block):
@@ -406,10 +421,11 @@ class Arm:
         aim = self.cell_pose(cell, "a", self.holding)
         put = self.cell_pose(cell, "p", self.holding)
         self.check(["safe", aim, put], [f"o{n}"])
-        self.go(aim, "travel", blend=True)
+        self.go(aim, "travel")                         # full stop at aim, then a short pause
+        self.aim_pause()
         self.go(put, "fine")                           # full stop: the gripper opens here
         self.grip(f"o{n}")
-        self.go(aim, "fine", blend=True)
+        self.go(aim, "fine")                           # full stop: straight out of the cell
         self.go("safe", "travel")
 
     def check_route(self, block, cell):
@@ -427,7 +443,7 @@ class Arm:
         btype = self.block_type(block)
         self.check_route(block, cell)
         print(f"block {block} ({btype}) -> cell {cell}   [{self.speed_name} speed, Space = stop]")
-        self.go("safe", "travel")
+        self.go("safe", "travel", blend=True)
         self.pick(block, stop_at_end=False)   # flows straight into place: no stop at safe
         self.place(cell)
 
@@ -449,9 +465,10 @@ class Arm:
         self.go("safe", "travel")
         self.grip(ATTACK_GRIP)
         self.holding = None            # closed, but nothing in it
-        self.go(aim, "travel", blend=True)
+        self.go(aim, "travel")                         # full stop at aim, then a short pause
+        self.aim_pause()
         self.go(knock, "fine")                         # full stop: reach the full knock depth
-        self.go(aim, "fine", blend=True)
+        self.go(aim, "fine")
         self.go("safe", "travel")
 
 

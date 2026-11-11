@@ -14,9 +14,9 @@ Cells (from your side):   1 2 3
 import re
 
 try:
-    import readline  # noqa: F401  (up-arrow command history)
+    import readline  # up-arrow command history
 except ImportError:
-    pass
+    readline = None
 
 import arm as arm_lib
 import hardware as hw
@@ -36,7 +36,7 @@ PATTERNS = {
 }
 
 HELP = """
-  1 5          pick block 1 and place it in cell 5
+  1 5          pick block 1 and place it in cell 5   (15 works too)
   k8           attack cell 8 (asks for the referee's OK first)
   PATTERN      for fun, on an EMPTY rack: fill a pattern, highest-point blocks first
                  /  \\          diagonals
@@ -52,6 +52,10 @@ HELP = """
   safe         move to the safe pose
   speed test|game
   help / quit                (Space during any move = stop and hold)
+
+  Queue: type the next command during a move and press Enter. It runs when
+  the current move ends. One command at most. Esc = cancel the queued command.
+  Space still means stop, so type "1 5" as "15" while the arm moves.
 
   Cells
     1 2 3
@@ -103,27 +107,53 @@ def run_pattern(a, symbol):
     print(f"  done: filled {len(plan)} of {len(cells)} cells")
 
 
+def ask(prompt, prefill=""):
+    """input(), starting with text typed during the last move (if readline is available)."""
+    if not (prefill and readline):
+        return input(prompt)
+    readline.set_startup_hook(lambda: readline.insert_text(prefill))
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook()
+
+
+def drop_queue():
+    queued = hw.typeahead.queued
+    hw.typeahead.clear()
+    if queued:
+        print(f"  queued '{queued}' dropped")
+
+
 def main():
-    a = arm_lib.Arm(speed="game", track=True)
+    a = arm_lib.Arm(speed="game", track=True, blend=True)
+    hw.typeahead.enabled = True
 
     if hw.DRY_RUN:
         print("=== PRACTICE MODE: motors are NOT moving ===")
     else:
         print("Connected. The arm is holding where it is; nothing has moved.")
-    print("Game speed. Space during a move = stop and hold.")
+    print("Game speed. Space during a move = stop and hold. Esc = cancel the queued command.")
     show_blocks(a)
     if a.tracker.used:
         print("  Starting a new game? Type 'reset' first.")
     print("Type 'help' for commands.")
 
     while True:
-        try:
-            line = input("game> ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
+        queued, partial = hw.typeahead.take()
+        if queued:
+            line = queued.strip().lower()
+            print(f"game> {line}   (from queue)")
+        else:
+            try:
+                line = ask("game> ", partial).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
         if not line:
             continue
+        if re.fullmatch(r"\d\d", line):   # "15" = "1 5" (Space can't be typed during a move)
+            line = f"{line[0]} {line[1]}"
         tokens = line.split()
         cmd = tokens[0]
 
@@ -172,13 +202,17 @@ def main():
             else:
                 print("  didn't understand that, type 'help'")
 
+        # A stop or an error also drops the queued command, so nothing moves on its own.
         except hw.StopPressed:
             print("\n  Stopped. Arm is holding still.")
+            drop_queue()
             show_blocks(a)
         except KeyError as e:
             print(f"  {e.args[0]}")
+            drop_queue()
         except (ValueError, RuntimeError) as e:
             print(f"  {e}")
+            drop_queue()
 
     a.close()
 

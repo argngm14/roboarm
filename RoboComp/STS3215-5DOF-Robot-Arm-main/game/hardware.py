@@ -83,6 +83,76 @@ class StopPressed(Exception):
     """Space was pressed during a move. The arm stopped and is holding still."""
 
 
+def _say(msg):
+    # The terminal is in raw mode during a move, so "\n" alone won't return the cursor.
+    sys.stdout.write(f"\r\n  {msg}\r\n")
+    sys.stdout.flush()
+
+
+class TypeAhead:
+    """
+    game.py only: type the next command while the arm moves. Enter queues it
+    (one command at most) and it runs when the current one finishes. Esc cancels
+    the queued command. Space still stops the arm, so type "1 5" as "15".
+    """
+    def __init__(self):
+        self.enabled = False
+        self.text = ""        # typed so far, not yet Enter'd
+        self.queued = None
+
+    def feed(self, key):
+        if not self.enabled:
+            return
+        if key in ("\r", "\n"):
+            line, self.text = self.text.strip(), ""
+            if not line:
+                return
+            if self.queued:
+                _say(f"queue full: '{self.queued}' is next (Esc cancels it)")
+            else:
+                self.queued = line
+                _say(f"queued: {line}   (Esc = cancel)")
+        elif key == "\x1b":
+            if self.queued or self.text:
+                _say("queue cancelled")
+            self.clear()
+        elif key in ("\x7f", "\x08"):
+            self.text = self.text[:-1]
+        elif key.isprintable():
+            self.text += key
+
+    def clear(self):
+        self.text, self.queued = "", None
+
+    def take(self):
+        """The queued command (or None), and any half-typed text. Both are cleared."""
+        out = (self.queued, self.text)
+        self.clear()
+        return out
+
+
+typeahead = TypeAhead()
+
+
+def _stop_key(term, key):
+    """True for Space / Ctrl+C (stop). Any other key goes to the type-ahead queue."""
+    if key in (" ", "\x03"):
+        return True
+    if key == "\x1b":
+        nxt = term.read_key(0.01)
+        if nxt in ("[", "o"):          # arrow or function key, not Esc: ignore the whole sequence
+            for _ in range(4):
+                k = term.read_key(0.01)
+                if not k or k.isalpha() or k == "~":
+                    break
+            return False
+        typeahead.feed("\x1b")
+        return _stop_key(term, nxt) if nxt else False
+    if key:
+        typeahead.feed(key)
+    return False
+
+
 # ---------------------------------------------------------------- real arm
 
 class LiveBus:
@@ -182,8 +252,7 @@ class LiveBus:
             keys = self.RawTerminal()
         with keys as term:
             while True:
-                key = term.read_key(POLL_SECONDS)
-                if key in (" ", "\x03"):
+                if _stop_key(term, term.read_key(POLL_SECONDS)):
                     self.hold(names)   # only the moving joints; gripper keeps its squeeze
                     raise StopPressed()
                 if not self._any_moving(names):
@@ -207,8 +276,7 @@ class LiveBus:
         bad_reads = 0
         with keys as term:
             while True:
-                key = term.read_key(0.005)
-                if key in (" ", "\x03"):
+                if _stop_key(term, term.read_key(0.005)):
                     self.hold(names)
                     raise StopPressed()
                 try:
