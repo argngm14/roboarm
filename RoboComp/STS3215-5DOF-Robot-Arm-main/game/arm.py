@@ -224,6 +224,7 @@ class Arm:
         self.current = [pos[n] for n in hw.ARM_JOINTS]
         self.grip_pos = pos[hw.GRIPPER]
         self.free = False        # True while arm torque is off for moving by hand
+        self.grip_free = False   # True while gripper torque is off (claw moves by hand)
         self.holding = None      # block type in the gripper, or None
         self._in_flight = False  # True right after a blended move (arm may still be moving)
 
@@ -252,11 +253,27 @@ class Arm:
         self.current = [pos[n] for n in hw.ARM_JOINTS]
         self.free = False
 
+    def release_gripper(self):
+        """
+        Gripper torque off, so the claw can be moved by hand (to fit it around a
+        block without any squeeze). A block in the gripper will DROP.
+        """
+        self.bus.torque([hw.GRIPPER], False)
+        self.grip_free = True
+
+    def hold_gripper(self):
+        """Gripper torque back on, holding wherever the claw is now (no jump)."""
+        pos = self.bus.hold([hw.GRIPPER])
+        self.grip_pos = pos[hw.GRIPPER]
+        self.grip_free = False
+
     def refresh(self):
-        """While free, read where the arm has been moved to by hand."""
+        """While free, read where the arm / gripper have been moved to by hand."""
         if self.free:
             pos = self.bus.read(hw.ARM_JOINTS)
             self.current = [pos[n] for n in hw.ARM_JOINTS]
+        if self.grip_free:
+            self.grip_pos = self.bus.read([hw.GRIPPER])[hw.GRIPPER]
 
     # --- low level ---
 
@@ -311,6 +328,8 @@ class Arm:
         bad = hw.outside_limits({hw.GRIPPER: position})
         if bad:
             raise ValueError("Outside gripper limit, nothing moved: " + hw.describe(bad))
+        if self.grip_free:
+            self.hold_gripper()   # torque back on where the claw is, then move: no jump
         t0 = time.monotonic()
         self.bus.send({hw.GRIPPER: position}, {hw.GRIPPER: GRIP_SPEED}, {hw.GRIPPER: self.sp["accel"]})
         self.grip_pos = position

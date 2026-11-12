@@ -26,6 +26,10 @@ HELP = """
   free             arm torque OFF so you can move it by hand  (SUPPORT THE ARM FIRST)
                    the gripper stays on, so a held block won't drop
   hold             arm torque ON, holds wherever it is now
+  freegrip         GRIPPER torque OFF: move the claw by hand around a block, no squeeze
+                   (a block in the gripper will drop). Then 'savegrip NAME' saves where it is.
+  holdgrip         gripper torque ON, holds wherever it is now
+                   (grip / set / nudge / pick turn it back on by themselves)
 
   SET / NUDGE MOTORS   order: base shoulder elbow wrist gripper  (raw ticks 0-4095)
   2000 - +50 -30 -     all 5 at once:  number = set to it,  +N / -N = nudge,  - = leave alone
@@ -88,7 +92,9 @@ def show(a):
         print("  ! outside joint limits: " + hw.describe(bad))
     notes = [f"{a.speed_name} speed"]
     if a.free:
-        notes.append("arm torque OFF, gripper on")
+        notes.append("arm torque OFF" + (", gripper torque OFF" if a.grip_free else ", gripper on"))
+    elif a.grip_free:
+        notes.append("GRIPPER torque OFF")
     if a.holding:
         notes.append(f"holding a {a.holding}")
     print("  (" + ", ".join(notes) + ")")
@@ -235,6 +241,16 @@ def main():
                 a.hold()
                 show(a)
 
+            elif cmd == "freegrip":
+                a.release_gripper()
+                print("  GRIPPER torque OFF. Move the claw by hand, then 'savegrip NAME' or 'holdgrip'.")
+                if a.holding:
+                    print(f"  (the {a.holding} may drop)")
+
+            elif cmd == "holdgrip":
+                a.hold_gripper()
+                show(a)
+
             elif cmd == "save" and len(tokens) == 2:
                 name = tokens[1].lower()
                 if name in arm_lib.grip_names():
@@ -256,6 +272,7 @@ def main():
                 if name not in arm_lib.grip_names():
                     print("  grip names: o1 o2 o3 (open), c1 c2 c3 (closed); 1 trophy, 2 cube, 3 cylinder")
                     continue
+                a.refresh()   # if the gripper was moved by hand, save where it really is
                 old = a.poses["grip"].get(name)
                 a.poses["grip"][name] = a.grip_pos
                 arm_lib.save_poses(a.poses)
