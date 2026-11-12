@@ -47,6 +47,11 @@ HELP = """
                                     (1 trophy, 2 cube, 3 cylinder)
   savegrip NAME    save the gripper position:  o1 o2 o3 = open,  c1 c2 c3 = closed
                    (1 trophy, 2 cube, 3 cylinder)
+  edit NAME ...    change a SAVED pose without moving the arm (no need to 'go' there first):
+                     edit c3_p 1 +20        motor 1 of c3_p, nudge +20
+                     edit c3_p - - -30 -    all 4 motors: '-' = leave alone, +N/-N = nudge, number = set
+                     edit c2 +30            a saved gripper value
+                   It prints old -> new and saves straight away. 'go NAME' to try it.
 
   TEST
   go NAME          move to a saved pose   (direct move, does NOT go via safe)
@@ -161,6 +166,65 @@ def move_motors(a, tokens):
     show(a)
 
 
+def edit_pose(a, tokens):
+    """
+    edit NAME v1 v2 v3 v4   change a saved arm pose (motors 1-4)
+    edit NAME M value       change one motor of it
+    edit NAME value         change a saved gripper value (o1..c3)
+    Values: number = set to it, +N / -N = nudge, '-' = leave alone.
+    Only the saved file changes; the arm does not move.
+    """
+    name, vals = tokens[0].lower(), tokens[1:]
+    is_grip = name in arm_lib.grip_names()
+    if not is_grip and name not in arm_lib.valid_pose_names():
+        print(f"  '{name}' isn't a valid pose name. Nothing changed.")
+        print("  " + arm_lib.POSE_NAME_HELP)
+        return
+    old = a.poses["grip" if is_grip else "arm"].get(name)
+    if old is None:
+        print(f"  '{name}' isn't saved yet, so there is nothing to edit. Use 'save' or 'savegrip' first.")
+        return
+    old = list(old) if not is_grip else [old]
+    count = len(old)                       # 4 motors for an arm pose, 1 for a gripper value
+    first_motor = 5 if is_grip else 1      # motor number of old[0]
+
+    if len(vals) == 2 and vals[0].isdigit():          # "M value": one motor
+        m = int(vals[0])
+        if not first_motor <= m < first_motor + count or not MOTOR_TOKEN.match(vals[1]) or vals[1] == "-":
+            print(f"  use e.g. 'edit {name} " + ("5 +20" if is_grip else "3 -25") + "'")
+            return
+        spec = ["-"] * count
+        spec[m - first_motor] = vals[1]
+    elif len(vals) == count and all(MOTOR_TOKEN.match(t) for t in vals):
+        spec = vals
+    else:
+        print(f"  expected {count} value{'s' if count > 1 else ''} (or 'motor value') after the name. Nothing changed.")
+        return
+
+    new = list(old)
+    for i, tok in enumerate(spec):
+        if tok == "-":
+            continue
+        wanted = old[i] + int(tok) if tok[0] in "+-" else int(tok)
+        if not 0 <= wanted <= 4095:
+            print(f"  motor {first_motor + i} would be {wanted}, outside 0-4095. Nothing changed.")
+            return
+        joint = hw.ALL_JOINTS[first_motor - 1 + i]
+        new[i] = hw.clamp(joint, wanted)
+        if new[i] != wanted:
+            lo, hi = hw.JOINT_LIMITS[joint]
+            print(f"  motor {first_motor + i} ({joint}) stopped at its limit {new[i]} (limit {lo}-{hi}, asked for {wanted})")
+
+    if is_grip:
+        a.poses["grip"][name] = new[0]
+    else:
+        a.poses["arm"][name] = new
+    arm_lib.save_poses(a.poses)
+    shown = (lambda v: v[0]) if is_grip else (lambda v: v)
+    print(f"  {name}: {shown(old)} -> {shown(new)}   (saved; the arm did not move)")
+    print(f"  Try it with 'go {name}'" if not is_grip else f"  Try it with 'grip {name}'")
+
+
 def warn_limits(targets):
     bad = hw.outside_limits(targets)
     if bad:
@@ -232,6 +296,9 @@ def main():
                 five = ["-"] * 5
                 five[motor - 1] = tokens[1]
                 move_motors(a, five)
+
+            elif cmd == "edit" and len(tokens) >= 3:
+                edit_pose(a, tokens[1:])
 
             elif cmd == "free":
                 a.release()
