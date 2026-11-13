@@ -60,6 +60,11 @@ HELP = """
                    (do this before recording cell poses, so a real block is in the gripper)
   place C          put the held block into cell C and come back to safe
   run B C          full pick-and-place: block B into cell C, via safe
+  sweeptest [C...] [step]
+                   fit check: with a block in the gripper (do 'pick B' first), carry it to the
+                   place pose of every cell, in and back out, never letting go. Stops if the
+                   claw moves (block slipping). 'sweeptest 1 5 9' = just those cells;
+                   'step' = wait for Enter at each cell so you can look (q = stop).
   attack C         knock cell C: gripper closes, then c_a -> c_k (or c_p) -> c_a -> safe
                    (teach mode doesn't track used blocks, so you can repeat picks freely)
   speed test|game  which speed pick/place/run/go use  (set in arm.py; starts on test)
@@ -367,6 +372,20 @@ def main():
 
             elif cmd == "attack" and len(tokens) == 2:
                 a.attack(int(tokens[1]))
+
+            elif cmd == "sweeptest":
+                args = [t.lower() for t in tokens[1:]]
+                cells = [int(t) for t in args if t.isdigit()]
+                odd = [t for t in args if not t.isdigit() and t != "step"]
+                if odd:
+                    print("  use: sweeptest [cells...] [step]   e.g. 'sweeptest', 'sweeptest 1 5 9', 'sweeptest step'")
+                    continue
+
+                def ask(cell):
+                    ans = input(f"  cell {cell}: block is at the place pose. Enter = next, q = stop: ")
+                    return ans.strip().lower() not in ("q", "quit", "stop")
+
+                a.sweep(cells or None, ask if "step" in args else None)
 
             elif cmd == "watch":
                 watch(a)

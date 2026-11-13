@@ -72,6 +72,10 @@ CELLS = range(1, 10)
 BLEND_TICKS = 150
 AIM_PAUSE = 0.2
 
+# sweeptest stops if the claw has moved more than this many ticks from where it
+# started (a block that slips or drops lets the claw close further). A guess: tune it.
+SWEEP_SLIP_TICKS = 80
+
 SPEEDS = {
     "test": {"travel": 700, "fine": 300, "accel": 20, "grip_wait": 0.7, "blend": 0},   # teach mode uses this
     # travel 3000 = the course's default and about the servo's top speed at 12 V (~3070).
@@ -446,6 +450,52 @@ class Arm:
         self.grip(f"o{n}")
         self.go(aim, "fine")                           # full stop: straight out of the cell
         self.go("safe", "travel")
+
+    def sweep(self, cells=None, at_place=None):
+        """
+        Fit check: with a block already in the gripper, take it to the place pose
+        of every cell (or just the cells given), in and back out, WITHOUT releasing it.
+        Route per cell is the same as place(): safe -> aim -> place -> aim -> safe.
+        at_place(cell), if given, is called while the block is at the place pose;
+        returning False stops the sweep after backing out.
+        Stops early if the claw moves (block slipped or dropped).
+        Returns the list of cells completed.
+        """
+        if not self.holding:
+            raise KeyError("Not holding a block. Use 'pick B' first (or 'grip c1' etc.)")
+        cells = list(cells) if cells else list(CELLS)
+        bad = [c for c in cells if c not in CELLS]
+        if bad:
+            raise KeyError(f"Cells must be 1-9, not {bad}")
+        route = {c: (self.cell_pose(c, "a", self.holding), self.cell_pose(c, "p", self.holding))
+                 for c in cells}
+        self.check(["safe"] + [p for pair in route.values() for p in pair])   # before anything moves
+        print(f"sweep: holding a {self.holding}, cells {cells}, never releasing   "
+              f"[{self.speed_name} speed, Space = stop]")
+        grip_start = self.bus.read([hw.GRIPPER])[hw.GRIPPER]
+        self.go("safe", "travel")
+        done = []
+        for c in cells:
+            aim, put = route[c]
+            print(f"cell {c}")
+            self.go(aim, "travel")
+            self.aim_pause()
+            self.go(put, "fine")
+            keep_going = at_place(c) if at_place else True
+            self.go(aim, "fine")
+            self.go("safe", "travel")
+            done.append(c)
+            moved = abs(self.bus.read([hw.GRIPPER])[hw.GRIPPER] - grip_start)
+            if moved > SWEEP_SLIP_TICKS:
+                print(f"  ! the gripper moved {moved} ticks, so the block may have slipped or dropped. "
+                      f"Sweep stopped after cell {c}.")
+                break
+            if keep_going is False:
+                print(f"  sweep stopped after cell {c}")
+                break
+        else:
+            print(f"sweep done: {self.holding} reached all of {done} and is still held")
+        return done
 
     def check_route(self, block, cell):
         """Everything pick_and_place(block, cell) needs, checked without moving."""
