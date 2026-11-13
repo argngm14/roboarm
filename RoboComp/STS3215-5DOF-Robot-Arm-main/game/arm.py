@@ -77,7 +77,7 @@ AIM_PAUSE = 0.2
 SWEEP_SLIP_TICKS = 80
 
 SPEEDS = {
-    "test": {"travel": 700, "fine": 300, "accel": 20, "grip_wait": 0.7, "blend": 0},   # teach mode uses this
+    "test": {"travel": 700, "fine": 180, "accel": 20, "grip_wait": 0.7, "blend": 0},   # teach mode uses this
     # travel 3000 = the course's default and about the servo's top speed at 12 V (~3070).
     # accel 254 is the course default (the most aggressive); 150 is a bit gentler.
     "game": {"travel": 3000, "fine": 1500, "accel": 150, "grip_wait": 0.5, "blend": BLEND_TICKS},
