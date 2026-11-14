@@ -1,7 +1,7 @@
 # pull_poses.ps1 - copy the arm data from the Raspberry Pi to this laptop as a backup.
 #
 # Run from PowerShell:
-#     powershell -ExecutionPolicy Bypass -File C:\Users\arago\engg\RoboComp\pull_poses.ps1
+#     powershell -ExecutionPolicy Bypass -File C:\Users\arago\Claude\projects\roboarm\RoboComp\pull_poses.ps1
 #
 # Every run makes NEW files in RoboComp\backups\ with the date and time in the
 # name, so old backups are never overwritten. It only reads from the Pi.
