@@ -80,7 +80,7 @@ def profile(distance, speed, accel):
 
 def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
                 clock=time.monotonic, sleep=time.sleep, tick=TICK,
-                spread_ok=None, spread_stop=None):
+                spread_ok=None, spread_stop=None, late=(), late_frac=0.0):
     """
     Drive every joint in `names` from `start` to `goal` along the straight line
     between them. Returns "done" (the final target has been sent), "stop"
@@ -90,6 +90,8 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
     send(targets, speeds, accs)  -> sends one synchronized target for every joint
     stop()                       -> True if the user asked to stop
     speed: ticks/s of the longest joint. accel: servo units (x100 steps/s^2).
+    late, late_frac: joints in `late` (e.g. the base) follow the same speed plan but
+    start late_frac of the planned move time later, so they finish after the others.
     """
     spread_ok = SPREAD_OK if spread_ok is None else spread_ok
     spread_stop = SPREAD_STOP if spread_stop is None else spread_stop
@@ -102,18 +104,24 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
     # (A joint that barely moves would only add noise.) Only these are read.
     big = [n for n in names if abs(delta[n]) >= max(0.2 * longest, 30)] or \
           [max(names, key=lambda n: abs(delta[n]))]
+    late = {n for n in late if n in names and delta[n] != 0} if late_frac > 0 else set()
+    if not any(abs(delta[n]) >= 30 for n in names if n not in late):
+        late = set()                            # nothing else really moves: no reason to wait
+    big = [n for n in big if n not in late]    # a late joint is behind on purpose: not "spread"
 
     # Speed cap for each joint, a bit above what it needs, so a joint that
     # moves little is not allowed to dash ahead.
     caps = {n: max(50, min(MAX_SPEED, int(1.5 * speed * abs(delta[n]) / longest) + 50)) for n in names}
     accs = {n: SERVO_ACCEL for n in names}
 
-    _, x = profile(longest, max(1.0, speed), max(1.0, accel * ACC_UNIT))
+    total, x = profile(longest, max(1.0, speed), max(1.0, accel * ACC_UNIT))
+    late_by = late_frac * total     # plan seconds the late joints start after the others
 
     t0 = clock()
     last_t = t0
     plan_t = 0.0                    # time along the speed plan; runs slower than the clock while joints spread
     s_sent = 0.0                    # how far along the line the last target was (0..1)
+    s_late = 0.0                    # same, for the late joints
     last = {n: start[n] for n in big}
     bad_reads = 0
     while True:
@@ -123,7 +131,7 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
         if now - t0 > timeout:
             return "timeout"
         try:
-            pos = read(big)
+            pos = read(big) if big else {}
             bad_reads = 0
             last = pos
         except RuntimeError:
@@ -139,7 +147,7 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
             ticks = (s_sent * delta[n] - (pos[n] - start[n])) * (1 if delta[n] > 0 else -1)
             ticks = max(0.0, abs(ticks) - SAG_TICKS) * (1 if ticks >= 0 else -1)
             behind.append(ticks / abs(delta[n]))
-        spread = max(behind) - min(behind)
+        spread = max(behind) - min(behind) if behind else 0.0
         if spread <= spread_ok:
             rate = 1.0
         elif spread >= SPREAD_HALT:
@@ -152,8 +160,9 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
         last_t = now
 
         s_now = max(s_sent, min(x(plan_t) / longest, 1.0))
-        send({n: round(start[n] + s_now * delta[n]) for n in names}, caps, accs)
+        s_late = max(s_late, min(x(plan_t - late_by) / longest, 1.0)) if late else 1.0
+        send({n: round(start[n] + (s_late if n in late else s_now) * delta[n]) for n in names}, caps, accs)
         s_sent = s_now
-        if s_now >= 1.0:
+        if s_now >= 1.0 and s_late >= 1.0:
             return "done"
         sleep(max(0.0, tick - (clock() - now)))

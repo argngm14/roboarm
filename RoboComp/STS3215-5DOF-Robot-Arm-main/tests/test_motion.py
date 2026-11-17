@@ -163,6 +163,46 @@ class SagTests(unittest.TestCase):
         self.assertLess(drift(sim.log, START, GOAL), 0.10)
 
 
+class BaseLateTests(unittest.TestCase):
+    # safe -> aim style move: the base swings 600 while the arm reaches out
+    A = {"base_yaw": 2600, "shoulder": 2200, "elbow": 1900, "wrist": 2048}
+    B = {"base_yaw": 2000, "shoulder": 1800, "elbow": 2400, "wrist": 2100}
+
+    def run_move(self, late_frac):
+        strong = {n: (15000, 3000) for n in NAMES}
+        sim = SimArm(self.A, strong, read_cost=0.02)
+        result = motion.run_coupled(sim.read, sim.send, lambda: False, NAMES, self.A, self.B, 3000, 150, 10,
+                                    clock=lambda: sim.t, sleep=sim.step,
+                                    late=("base_yaw",), late_frac=late_frac)
+        sim.settle(self.B)
+        return result, sim
+
+    def base_share_when_others_arrive(self, sim):
+        """How far the base had got when the shoulder and elbow first reached their goal."""
+        for x in sim.log:
+            if all(abs(x[n] - self.B[n]) <= 3 for n in ("shoulder", "elbow")):
+                return (x["base_yaw"] - self.A["base_yaw"]) / (self.B["base_yaw"] - self.A["base_yaw"])
+        return 1.0
+
+    def test_base_turns_after_the_others(self):
+        result, sim = self.run_move(0.3)
+        self.assertEqual(result, "done")
+        self.assertEqual(sim.sent[-1], self.B)
+        self.assertLess(self.base_share_when_others_arrive(sim), 0.9)    # others got there first
+        for n in NAMES:
+            self.assertAlmostEqual(sim.x[n], self.B[n], delta=3)
+
+    def test_without_delay_the_base_moves_with_the_others(self):
+        _, sim = self.run_move(0.0)
+        self.assertGreater(self.base_share_when_others_arrive(sim), 0.9)
+
+    def test_late_base_is_not_mistaken_for_spread(self):
+        # the base is behind on purpose, so the move should only be longer by about the delay
+        _, plain = self.run_move(0.0)
+        _, late = self.run_move(0.3)
+        self.assertLess(late.t, plain.t * 1.6)
+
+
 class SafetyTests(unittest.TestCase):
     def test_stop_returns_stop_and_sends_nothing_more(self):
         sim = SimArm(START, WEAK_SHOULDER)

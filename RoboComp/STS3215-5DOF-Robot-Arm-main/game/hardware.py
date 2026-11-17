@@ -245,7 +245,7 @@ class LiveBus:
                 return True
         return False
 
-    def coupled_move(self, names, start, goal, speed, accel, timeout):
+    def coupled_move(self, names, start, goal, speed, accel, timeout, late=(), late_frac=0.0):
         """
         Move start -> goal keeping every joint on the straight line between them
         (see motion.py): the target never runs ahead of the slowest joint.
@@ -261,6 +261,7 @@ class LiveBus:
                 stop=lambda: term.read_key(0) in (" ", "\x03"),
                 names=list(names), start=start, goal=goal,
                 speed=speed, accel=accel, timeout=timeout,
+                late=late, late_frac=late_frac,
             )
         if result == "stop":
             self.hold(names)
@@ -268,6 +269,18 @@ class LiveBus:
         if result == "timeout":
             self.hold(names)
             raise RuntimeError("Move took too long, so the arm may be blocked. Stopped and holding.")
+
+    def pause(self, names, seconds):
+        """Wait `seconds` while the arm moves. Space (or Ctrl+C) stops and holds."""
+        keys = _NoKeys()
+        if self.RawTerminal is not None and sys.stdin.isatty():
+            keys = self.RawTerminal()
+        end = time.monotonic() + seconds
+        with keys as term:
+            while time.monotonic() < end:
+                if term.read_key(min(POLL_SECONDS, max(0.0, end - time.monotonic()))) in (" ", "\x03"):
+                    self.hold(names)
+                    raise StopPressed()
 
     def wait(self, names, timeout):
         """Wait for the move to finish. Space (or Ctrl+C) stops and holds."""
@@ -378,8 +391,11 @@ class DryBus:
     def hold(self, names=ALL_JOINTS):
         return self.read(names)
 
-    def coupled_move(self, names, start, goal, speed, accel, timeout):
+    def coupled_move(self, names, start, goal, speed, accel, timeout, late=(), late_frac=0.0):
         self.send(goal, {n: 1 for n in goal}, {n: 1 for n in goal})
+
+    def pause(self, names, seconds):
+        pass
 
     def wait(self, names, timeout):
         pass

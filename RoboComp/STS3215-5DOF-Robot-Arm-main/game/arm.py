@@ -39,6 +39,7 @@ import os
 import time
 
 import hardware as hw
+import motion
 
 # Block type numbers, used in the grip names o1-o3 / c1-c3.
 TYPE_NUMBER = {"trophy": 1, "cube": 2, "cylinder": 3}
@@ -71,6 +72,12 @@ CELLS = range(1, 10)
 # test speed stop at every pose with no pause, as before.
 BLEND_TICKS = 0     # blending is OFF (0). Corner cutting changed the path; set e.g. 150 to turn it back on.
 AIM_PAUSE = 0.2
+
+# The base starts turning a little AFTER the other motors on the big moves (safe <-> aim,
+# and teach-mode 'go'), so the arm settles its height and reach before it swings sideways
+# (it was sweeping a trophy on the way to b2_a). 0.3 = the base starts 30% of the move's
+# time later, and the move takes that much longer. 0 = all motors together, as before.
+BASE_LATE = 0.3
 
 # sweeptest stops if the claw has moved more than this many ticks from where it
 # started (a block that slips or drops lets the claw close further). A guess: tune it.
@@ -284,9 +291,10 @@ class Arm:
 
     # --- low level ---
 
-    def move(self, target, speed=None, accel=None, blend=0):
+    def move(self, target, speed=None, accel=None, blend=0, base_late=0.0):
         """
         Move all 4 arm joints together and wait until they arrive.
+        base_late > 0: the base starts that share of the move's time after the others.
         blend > 0: don't wait for a full stop; return once every joint is within
         `blend` ticks, so the next move() carries straight on (one continuous motion).
         """
@@ -307,11 +315,25 @@ class Arm:
         longest = max(abs(goal[n] - start[n]) for n in hw.ARM_JOINTS) or 1
         timeout = 3 + 2 * longest / speed
         coupled = bool(self.sp.get("coupled")) and not blend    # coupled moves always stop at the end
+        base = hw.ARM_JOINTS[0]
+        others_move = any(abs(goal[n] - start[n]) >= 30 for n in hw.ARM_JOINTS if n != base)
+        late = base_late if (base_late > 0 and not blend and goal[base] != start[base] and others_move) else 0.0
+        if late:
+            timeout += late * motion.profile(longest, speed, accel * motion.ACC_UNIT)[0]
         t0 = time.monotonic()
         try:
             if coupled:
-                self.bus.coupled_move(hw.ARM_JOINTS, start, goal, speed, accel, timeout)
+                self.bus.coupled_move(hw.ARM_JOINTS, start, goal, speed, accel, timeout,
+                                      late=(base,) if late else (), late_frac=late)
                 self.bus.wait(hw.ARM_JOINTS, timeout=timeout)      # let it settle on the final target
+            elif late:
+                # plain servo moves: the other motors first, the base a moment later
+                speeds, accs, _ = synced_profile(start, goal, speed, accel)
+                rest = [n for n in hw.ARM_JOINTS if n != base]
+                self.bus.send({n: goal[n] for n in rest}, speeds, accs)
+                self.bus.pause(hw.ARM_JOINTS, late * motion.profile(longest, speed, accel * motion.ACC_UNIT)[0])
+                self.bus.send({base: goal[base]}, speeds, accs)
+                self.bus.wait(hw.ARM_JOINTS, timeout=timeout)
             else:
                 speeds, accs, _ = synced_profile(start, goal, speed, accel)
                 self.bus.send(goal, speeds, accs)
@@ -366,7 +388,8 @@ class Arm:
             raise KeyError(f"No arm pose called '{name}' saved yet")
         print(f"  -> {name}")
         self.move(self.poses["arm"][name], self.sp[kind],
-                  blend=self.sp["blend"] if blend and self.blending() else 0)
+                  blend=self.sp["blend"] if blend and self.blending() else 0,
+                  base_late=BASE_LATE if kind == "travel" else 0.0)
 
     def aim_pause(self):
         """Short still moment at the aim pose before going in to grab/place (blending only)."""

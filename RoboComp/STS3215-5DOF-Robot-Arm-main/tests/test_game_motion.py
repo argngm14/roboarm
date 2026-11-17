@@ -62,6 +62,55 @@ class BlendTests(unittest.TestCase):
             self.assertEqual(pauses, [], (speed, blend))
 
 
+class SendLog(hw.DryBus):
+    def __init__(self):
+        super().__init__()
+        self.log = []
+
+    def send(self, targets, speeds, accs):
+        self.log.append(("send", sorted(targets)))
+        super().send(targets, speeds, accs)
+
+    def pause(self, names, seconds):
+        self.log.append(("pause", round(seconds, 3)))
+
+
+class BaseLateTests(unittest.TestCase):
+    def make(self, speed):
+        bus = SendLog()
+        poses = {"arm": {"safe": [2000, 2000, 2000, 2000], "b2_a": [2600, 1800, 2300, 2000],
+                         "b2_g": [2600, 1700, 2400, 2000]}, "grip": {}}
+        with patch.object(hw, "open_bus", return_value=bus), \
+             patch.object(arm_lib, "load_poses", return_value=poses):
+            a = arm_lib.Arm(speed=speed)
+        a.current = [2000, 2000, 2000, 2000]
+        bus.log.clear()
+        return a, bus
+
+    def test_test_speed_sends_base_after_a_pause_on_travel_moves(self):
+        a, bus = self.make("test")
+        a.go("b2_a", "travel")
+        base, rest = ["base_yaw"], sorted(n for n in hw.ARM_JOINTS if n != "base_yaw")
+        self.assertEqual(bus.log[0], ("send", rest))
+        self.assertEqual(bus.log[1][0], "pause")
+        self.assertGreater(bus.log[1][1], 0)
+        self.assertEqual(bus.log[2], ("send", base))
+
+    def test_fine_moves_do_not_delay_the_base(self):
+        a, bus = self.make("test")
+        a.current = [2600, 1800, 2300, 2000]
+        a.go("b2_g", "fine")
+        self.assertEqual([e[0] for e in bus.log], ["send"])
+
+    def test_game_speed_passes_the_delay_to_the_coupled_move(self):
+        a, bus = self.make("game")
+        seen = {}
+        bus.coupled_move = lambda *args, **kw: seen.update(kw)
+        a.go("b2_a", "travel")
+        self.assertEqual(seen.get("late"), ("base_yaw",))
+        self.assertEqual(seen.get("late_frac"), arm_lib.BASE_LATE)
+
+
 class FakeTerm:
     def __init__(self, keys):
         self.keys = list(keys)
