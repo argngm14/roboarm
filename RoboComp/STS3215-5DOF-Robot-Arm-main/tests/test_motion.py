@@ -16,8 +16,9 @@ WEAK_SHOULDER = {"base_yaw": (15000, 3000), "shoulder": (6000, 2200),
 class SimArm:
     """Servos that drive to their latest target, limited by the command AND by what the motor can do."""
 
-    def __init__(self, start, capability):
+    def __init__(self, start, capability, read_cost=0.0):
         self.t = 0.0
+        self.read_cost = read_cost          # seconds each servo read takes (the real Pi is not instant)
         self.cap = capability
         self.x = {n: float(start[n]) for n in NAMES}
         self.v = {n: 0.0 for n in NAMES}
@@ -32,7 +33,9 @@ class SimArm:
         for n in targets:
             self.tgt[n], self.vcap[n], self.acc[n] = targets[n], speeds[n], accs[n]
 
-    def read(self):
+    def read(self, names=NAMES):
+        if self.read_cost:
+            self.step(self.read_cost * len(names))
         return {n: round(self.x[n]) for n in NAMES}
 
     def step(self, dt):
@@ -80,6 +83,7 @@ def classic_move(sim, speed, accel_units):
 
 
 def coupled_move(sim, speed, accel_units, stop=lambda: False, timeout=10):
+    sim.read_cost = sim.read_cost or 0.02          # assume a slow 20 ms per servo read
     result = motion.run_coupled(sim.read, sim.send, stop, NAMES, START, GOAL, speed, accel_units, timeout,
                                 clock=lambda: sim.t, sleep=sim.step)
     sim.settle(GOAL)
@@ -115,17 +119,21 @@ class PathTests(unittest.TestCase):
     def test_coupled_fast_move_stays_straight_and_arrives(self):
         sim = SimArm(START, WEAK_SHOULDER)
         self.assertEqual(coupled_move(sim, 3000, 150), "done")
-        self.assertLess(drift(sim.log, START, GOAL), 0.06)
+        self.assertLess(drift(sim.log, START, GOAL), 0.08)       # the old way bends > 15%
         self.assertEqual(sim.sent[-1], GOAL)            # the last target is exactly the goal
         for n in NAMES:
             self.assertAlmostEqual(sim.x[n], GOAL[n], delta=3)
 
-    def test_coupled_move_is_no_slower_than_it_has_to_be(self):
-        # with strong motors the coupling should cost little time
+    def test_coupled_move_is_not_throttled_by_slow_reads(self):
+        # Regression: an earlier version capped the speed at (lead / read time), so on the
+        # real Pi every game-speed move crawled. With motors that keep up and slow reads,
+        # a coupled move must take about as long as a plain one.
         strong = {n: (15000, 3000) for n in NAMES}
-        sim = SimArm(START, strong)
+        plain = SimArm(START, strong)
+        classic_move(plain, 3000, 15000)
+        sim = SimArm(START, strong, read_cost=0.02)
         coupled_move(sim, 3000, 150)
-        self.assertLess(sim.t, 1.0)
+        self.assertLess(sim.t, 1.6 * plain.t)
 
 
 class SafetyTests(unittest.TestCase):
@@ -161,7 +169,7 @@ class SafetyTests(unittest.TestCase):
         sim = SimArm(START, WEAK_SHOULDER)
         fails = {"left": 1}
 
-        def flaky():
+        def flaky(names):
             if fails["left"] > 0:
                 fails["left"] -= 1
                 raise RuntimeError("garbled")
@@ -170,7 +178,7 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(motion.run_coupled(flaky, sim.send, lambda: False, NAMES, START, GOAL, 3000, 150, 10,
                                             clock=lambda: sim.t, sleep=sim.step), "done")
 
-        def dead():
+        def dead(names):
             raise RuntimeError("no reply")
 
         with self.assertRaises(RuntimeError):

@@ -10,11 +10,14 @@ while every motor can do what it is told. At high speed the heavier joints
 behind in the middle of the move and catch up at the end. The gripper then
 follows a curve instead of a straight line, and the bend grows with speed.
 
-A coupled move fixes that by feedback. It sends a new target about 50 times a
-second, always on the straight line from start to goal, and it never lets the
-target run more than LEAD_TICKS ahead of the SLOWEST joint's real position.
-If a heavy joint lags, the whole arm slows down to match it, so the path stays
-straight at any speed.
+A coupled move fixes that by feedback. It sends a new target many times a
+second, always on the straight line from start to goal, following the normal
+speed plan. It also watches how far apart the joints are (the "spread": how
+much further along the move one joint is than another). All joints lagging
+by the same amount is normal and harmless, so that does not slow anything.
+Only when the spread grows past SPREAD_OK does the plan slow down, and it
+pauses completely at SPREAD_STOP, so the lagging joint catches up and the
+path stays straight.
 
 This file only holds the logic (no serial port), so it can be tested on a
 laptop with a simulated arm. hardware.py wires it to the real motors.
@@ -24,7 +27,9 @@ import math
 import time
 
 TICK = 0.02          # seconds between target updates
-LEAD_TICKS = 60      # target may be at most this many ticks (of the longest joint) ahead of the slowest joint. Smaller = straighter but slower.
+SPREAD_OK = 0.02     # joints may be up to 2% of the move apart before the plan slows down
+SPREAD_STOP = 0.06   # at 6% apart the plan pauses until the lagging joint catches up.
+                     # Smaller = straighter but slower; bigger = faster but bends more.
 MAX_SPEED = 3000     # servo speed cap sent with each target (same as the course default)
 SERVO_ACCEL = 254    # servo's own acceleration setting: the highest, so it follows each target tightly
 ACC_UNIT = 100       # one acceleration unit = 100 steps/s^2 (taken from the Feetech docs; unverified here)
@@ -68,24 +73,27 @@ def profile(distance, speed, accel):
 
 
 def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
-                clock=time.monotonic, sleep=time.sleep, tick=TICK, lead=LEAD_TICKS):
+                clock=time.monotonic, sleep=time.sleep, tick=TICK,
+                spread_ok=None, spread_stop=None):
     """
     Drive every joint in `names` from `start` to `goal` along the straight line
     between them. Returns "done" (the final target has been sent), "stop"
     (stop() returned True) or "timeout".
 
-    read()                       -> {name: position}
+    read(joints)                 -> {name: position} for those joints
     send(targets, speeds, accs)  -> sends one synchronized target for every joint
     stop()                       -> True if the user asked to stop
     speed: ticks/s of the longest joint. accel: servo units (x100 steps/s^2).
     """
+    spread_ok = SPREAD_OK if spread_ok is None else spread_ok
+    spread_stop = SPREAD_STOP if spread_stop is None else spread_stop
     delta = {n: goal[n] - start[n] for n in names}
     longest = max(abs(d) for d in delta.values())
     if longest == 0:
         return "done"
 
-    # Joints that move a meaningful amount decide how far along the move we are.
-    # (A joint that barely moves would only add noise.)
+    # Joints that move a meaningful amount are the ones whose spread bends the path.
+    # (A joint that barely moves would only add noise.) Only these are read.
     big = [n for n in names if abs(delta[n]) >= max(0.2 * longest, 30)] or \
           [max(names, key=lambda n: abs(delta[n]))]
 
@@ -97,18 +105,19 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
     _, x = profile(longest, max(1.0, speed), max(1.0, accel * ACC_UNIT))
 
     t0 = clock()
+    last_t = t0
+    plan_t = 0.0                    # time along the speed plan; runs slower than the clock while joints spread
     s_sent = 0.0                    # how far along the line the last target was (0..1)
-    last = dict(start)
+    last = {n: start[n] for n in big}
     bad_reads = 0
     while True:
         if stop():
             return "stop"
-        elapsed = clock() - t0
-        if elapsed > timeout:
+        now = clock()
+        if now - t0 > timeout:
             return "timeout"
-        cycle_start = clock()
         try:
-            pos = read()
+            pos = read(big)
             bad_reads = 0
             last = pos
         except RuntimeError:
@@ -117,12 +126,20 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
                 raise
             pos = last
 
-        # How far has the SLOWEST big joint really got?
-        progress = min(min(max((pos[n] - start[n]) / delta[n], 0.0), 1.0) for n in big)
-        s_plan = x(elapsed) / longest
-        s_now = max(s_sent, min(s_plan, progress + lead / longest, 1.0))
+        progress = [min(max((pos[n] - start[n]) / delta[n], 0.0), 1.0) for n in big]
+        spread = max(progress) - min(progress)
+        if spread <= spread_ok:
+            rate = 1.0
+        elif spread >= spread_stop:
+            rate = 0.0
+        else:
+            rate = 1.0 - (spread - spread_ok) / (spread_stop - spread_ok)
+        plan_t += (now - last_t) * rate
+        last_t = now
+
+        s_now = max(s_sent, min(x(plan_t) / longest, 1.0))
         send({n: round(start[n] + s_now * delta[n]) for n in names}, caps, accs)
         s_sent = s_now
         if s_now >= 1.0:
             return "done"
-        sleep(max(0.0, tick - (clock() - cycle_start)))
+        sleep(max(0.0, tick - (clock() - now)))

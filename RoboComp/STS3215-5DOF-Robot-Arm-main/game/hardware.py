@@ -256,7 +256,7 @@ class LiveBus:
             keys = self.RawTerminal()
         with keys as term:
             result = motion.run_coupled(
-                read=lambda: self.read(names),
+                read=lambda joints: self.read(joints),
                 send=self.send,
                 stop=lambda: term.read_key(0) in (" ", "\x03"),
                 names=list(names), start=start, goal=goal,
