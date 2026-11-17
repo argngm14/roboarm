@@ -136,6 +136,33 @@ class PathTests(unittest.TestCase):
         self.assertLess(sim.t, 1.6 * plain.t)
 
 
+class SagArm(SimArm):
+    """Loaded joints stop a few ticks short of their target (gravity plus a held block)."""
+    SAG = {"base_yaw": 0, "shoulder": -8, "elbow": 4, "wrist": -3}
+
+    def send(self, targets, speeds, accs):
+        super().send({n: targets[n] + self.SAG[n] for n in targets}, speeds, accs)
+        self.sent[-1] = dict(targets)
+
+
+class SagTests(unittest.TestCase):
+    def test_short_lift_with_sag_finishes(self):
+        # Regression: on the short lift after a grab, a few ticks of sag looked like the joints
+        # drifting apart, the plan paused forever, and game.py said "move took too long".
+        grab = {"base_yaw": 1500, "shoulder": 1600, "elbow": 2400, "wrist": 2100}
+        aim = {"base_yaw": 1500, "shoulder": 1660, "elbow": 2330, "wrist": 2140}
+        sim = SagArm(grab, WEAK_SHOULDER, read_cost=0.02)
+        result = motion.run_coupled(sim.read, sim.send, lambda: False, NAMES, grab, aim, 1500, 150, 3.0,
+                                    clock=lambda: sim.t, sleep=sim.step)
+        self.assertEqual(result, "done")
+        self.assertLess(sim.t, 1.0)
+
+    def test_long_move_with_sag_stays_straight(self):
+        sim = SagArm(START, WEAK_SHOULDER, read_cost=0.02)
+        self.assertEqual(coupled_move(sim, 3000, 150), "done")
+        self.assertLess(drift(sim.log, START, GOAL), 0.10)
+
+
 class SafetyTests(unittest.TestCase):
     def test_stop_returns_stop_and_sends_nothing_more(self):
         sim = SimArm(START, WEAK_SHOULDER)

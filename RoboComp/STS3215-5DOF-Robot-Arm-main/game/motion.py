@@ -16,7 +16,7 @@ speed plan. It also watches how far apart the joints are (the "spread": how
 much further along the move one joint is than another). All joints lagging
 by the same amount is normal and harmless, so that does not slow anything.
 Only when the spread grows past SPREAD_OK does the plan slow down, and it
-pauses completely at SPREAD_STOP, so the lagging joint catches up and the
+drops to MIN_RATE at SPREAD_STOP, so the lagging joint catches up and the
 path stays straight.
 
 This file only holds the logic (no serial port), so it can be tested on a
@@ -28,7 +28,13 @@ import time
 
 TICK = 0.02          # seconds between target updates
 SPREAD_OK = 0.02     # joints may be up to 2% of the move apart before the plan slows down
-SPREAD_STOP = 0.06   # at 6% apart the plan pauses until the lagging joint catches up.
+SPREAD_STOP = 0.06   # at 6% apart the plan runs at only MIN_RATE until the lagging joint catches up.
+MIN_RATE = 0.15      # never stop the plan completely: a joint that sags a little (gravity, a held
+                     # block) never closes the gap, and a full pause would then wait forever
+SPREAD_HALT = 0.20   # this far apart (after SAG_TICKS) a joint must be stuck: stop the plan and let
+                     # the timeout stop the arm, instead of dragging the other joints on without it
+SAG_TICKS = 15       # each joint may be this many ticks off the line without counting as spread
+                     # (sag and servo wobble, which matter on short moves like the lift after a grab)
                      # Smaller = straighter but slower; bigger = faster but bends more.
 MAX_SPEED = 3000     # servo speed cap sent with each target (same as the course default)
 SERVO_ACCEL = 254    # servo's own acceleration setting: the highest, so it follows each target tightly
@@ -126,14 +132,22 @@ def run_coupled(read, send, stop, names, start, goal, speed, accel, timeout,
                 raise
             pos = last
 
-        progress = [min(max((pos[n] - start[n]) / delta[n], 0.0), 1.0) for n in big]
-        spread = max(progress) - min(progress)
+        # How far behind its own last target is each joint, as a share of its move?
+        # The first SAG_TICKS of that don't count.
+        behind = []
+        for n in big:
+            ticks = (s_sent * delta[n] - (pos[n] - start[n])) * (1 if delta[n] > 0 else -1)
+            ticks = max(0.0, abs(ticks) - SAG_TICKS) * (1 if ticks >= 0 else -1)
+            behind.append(ticks / abs(delta[n]))
+        spread = max(behind) - min(behind)
         if spread <= spread_ok:
             rate = 1.0
-        elif spread >= spread_stop:
+        elif spread >= SPREAD_HALT:
             rate = 0.0
+        elif spread >= spread_stop:
+            rate = MIN_RATE
         else:
-            rate = 1.0 - (spread - spread_ok) / (spread_stop - spread_ok)
+            rate = 1.0 - (1.0 - MIN_RATE) * (spread - spread_ok) / (spread_stop - spread_ok)
         plan_t += (now - last_t) * rate
         last_t = now
 
