@@ -266,200 +266,220 @@ def load_sequence_points(seq_name):
     return points
 
 
-def main():
-    a = arm_lib.Arm(speed="test")
+def enter(a):
+    """Put an open Arm into teach mode: test speed, no block tracking, no blending, no queue."""
+    a.set_speed("test")
+    a.track = False
+    a.allow_blend = False
+    hw.typeahead.enabled = False
+    hw.typeahead.clear()
 
+
+def banner(a):
     if hw.DRY_RUN:
         print("=== PRACTICE MODE: motors are NOT moving. Saving to poses_dryrun.json ===")
         print("=== Set DRY_RUN = False in hardware.py to use the real arm.          ===")
     else:
         print("Connected. The arm is holding where it is; nothing has moved.")
         print("Space during a move = stop and hold. Keep the physical stop within reach.")
+
+
+def goodbye(a):
+    if not hw.DRY_RUN:
+        print("Leaving. Torque stays " + ("OFF." if a.free else "ON (arm holding)."))
+
+
+def handle(a, line):
+    """Run one teach-mode command. Returns False when the user wants to quit."""
+    tokens = line.split()
+    cmd = tokens[0].lower()
+
+    try:
+        if len(tokens) == 5 and all(MOTOR_TOKEN.match(t) for t in tokens):
+            move_motors(a, tokens)
+
+        elif cmd.isdigit() and len(tokens) == 2:
+            motor = int(cmd)
+            if not 1 <= motor <= 5 or not MOTOR_TOKEN.match(tokens[1]) or tokens[1] == "-":
+                print("  use e.g. '3 -25' or '2 1800' (motors 1-5)")
+                return True
+            five = ["-"] * 5
+            five[motor - 1] = tokens[1]
+            move_motors(a, five)
+
+        elif cmd == "edit" and len(tokens) >= 3:
+            edit_pose(a, tokens[1:])
+
+        elif cmd == "free":
+            a.release()
+            print("  arm torque OFF (gripper still on). Move the arm by hand, then 'save NAME' or 'hold'.")
+
+        elif cmd == "hold":
+            a.hold()
+            show(a)
+
+        elif cmd == "freegrip":
+            a.release_gripper()
+            print("  GRIPPER torque OFF. Move the claw by hand, then 'savegrip NAME' or 'holdgrip'.")
+            if a.holding:
+                print(f"  (the {a.holding} may drop)")
+
+        elif cmd == "holdgrip":
+            a.hold_gripper()
+            show(a)
+
+        elif cmd == "save" and len(tokens) == 2:
+            name = tokens[1].lower()
+            if name in arm_lib.grip_names():
+                print(f"  {name} is a gripper name. Did you mean 'savegrip {name}'?")
+                return True
+            if name not in arm_lib.valid_pose_names():
+                print(f"  '{name}' isn't a valid pose name. Nothing saved.")
+                print("  " + arm_lib.POSE_NAME_HELP)
+                return True
+            a.refresh()
+            old = a.poses["arm"].get(name)
+            a.poses["arm"][name] = list(a.current)
+            arm_lib.save_poses(a.poses)
+            print(f"  saved {name} = {a.current}" + (f"   (was {old})" if old else ""))
+            warn_limits(dict(zip(hw.ARM_JOINTS, a.current)))
+
+        elif cmd == "savegrip" and len(tokens) == 2:
+            name = tokens[1].lower()
+            if name not in arm_lib.grip_names():
+                print("  grip names: o1 o2 o3 (open), c1 c2 c3 (closed); 1 trophy, 2 cube, 3 cylinder")
+                return True
+            a.refresh()   # if the gripper was moved by hand, save where it really is
+            old = a.poses["grip"].get(name)
+            a.poses["grip"][name] = a.grip_pos
+            arm_lib.save_poses(a.poses)
+            print(f"  saved grip {name} = {a.grip_pos}" + (f"   (was {old})" if old is not None else ""))
+            warn_limits({hw.GRIPPER: a.grip_pos})
+
+        elif cmd == "go" and len(tokens) == 2:
+            a.go(tokens[1])
+            show(a)
+
+        elif cmd == "grip" and len(tokens) == 2:
+            a.grip(tokens[1].lower())
+
+        elif cmd == "pick" and len(tokens) == 2:
+            if a.holding:
+                print(f"  already holding a {a.holding}; 'place C' or open the gripper first")
+                return True
+            a.pick(int(tokens[1]))
+
+        elif cmd == "place" and len(tokens) == 2:
+            a.place(int(tokens[1]))
+
+        elif cmd == "run" and len(tokens) == 3:
+            a.pick_and_place(int(tokens[1]), int(tokens[2]))
+
+        elif cmd == "attack" and len(tokens) == 2:
+            a.attack(int(tokens[1]))
+
+        elif cmd == "sweeptest":
+            args = [t.lower() for t in tokens[1:]]
+            cells = [int(t) for t in args if t.isdigit()]
+            odd = [t for t in args if not t.isdigit() and t != "step"]
+            if odd:
+                print("  use: sweeptest [cells...] [step]   e.g. 'sweeptest', 'sweeptest 1 5 9', 'sweeptest step'")
+                return True
+
+            def ask(cell):
+                ans = input(f"  cell {cell}: block is at the place pose. Enter = next, q = stop: ")
+                return ans.strip().lower() not in ("q", "quit", "stop")
+
+            a.sweep(cells or None, ask if "step" in args else None)
+
+        elif cmd == "watch":
+            watch(a)
+
+        elif cmd == "speed" and len(tokens) == 2:
+            a.set_speed(tokens[1].lower())
+            sp = arm_lib.SPEEDS[a.speed_name]
+            print(f"  {a.speed_name} speed: travel {sp['travel']}, fine {sp['fine']}, "
+                  f"accel {sp['accel']}, grip wait {sp['grip_wait']}s")
+
+        elif cmd == "show":
+            show(a)
+
+        elif cmd == "limits":
+            for i, name in enumerate(hw.ALL_JOINTS, start=1):
+                lo, hi = hw.JOINT_LIMITS[name]
+                print(f"  motor {i} {name:9s} {lo:4d} - {hi:4d}")
+            print("  (edit JOINT_LIMITS in hardware.py, then restart teach mode)")
+
+        elif cmd == "list":
+            valid = set(arm_lib.valid_pose_names())
+            for name, v in sorted(a.poses["arm"].items()):
+                note = "" if name in valid else "   (old name, never used)"
+                print(f"  {name:20s} {' '.join(str(x) for x in v)}{note}")
+            for name, v in sorted(a.poses["grip"].items()):
+                print(f"  grip {name:15s} {v}")
+
+        elif cmd == "missing":
+            need = [n for n in arm_lib.required_poses() if n not in a.poses["arm"]]
+            need += [f"grip:{g}" for g in arm_lib.required_grips() if g not in a.poses["grip"]]
+            print("  " + (", ".join(need) if need else "nothing, all recorded"))
+
+        elif cmd == "points" and len(tokens) == 2:
+            for i, p in enumerate(load_sequence_points(tokens[1]), start=1):
+                values = " ".join(str(p[n]) for n in hw.ALL_JOINTS)
+                print(f"  {i:2d}: {values}")
+
+        elif cmd == "take" and len(tokens) == 4:
+            points = load_sequence_points(tokens[1])
+            n = int(tokens[2])
+            if not 1 <= n <= len(points):
+                print(f"  that file has points 1-{len(points)}")
+                return True
+            p = points[n - 1]
+            name = tokens[3].lower()
+            if name not in arm_lib.valid_pose_names():
+                print(f"  '{name}' isn't a valid pose name. Nothing saved.")
+                print("  " + arm_lib.POSE_NAME_HELP)
+                return True
+            a.poses["arm"][name] = [p[j] for j in hw.ARM_JOINTS]
+            arm_lib.save_poses(a.poses)
+            print(f"  saved {name} = {a.poses['arm'][name]}   (gripper in that point was {p[hw.GRIPPER]})")
+            warn_limits({j: p[j] for j in hw.ARM_JOINTS})
+
+        elif cmd == "help":
+            print(HELP)
+
+        elif cmd in ("quit", "exit", "q"):
+            return False
+
+        else:
+            print("  didn't understand that, type 'help'")
+
+    except hw.StopPressed:
+        print("\n  Stopped. Arm is holding still.")
+    except KeyError as e:
+        print(f"  {e.args[0]}")
+    except (ValueError, RuntimeError) as e:
+        print(f"  {e}")
+    except ImportError:
+        print("  angle files need the course code (arm_helpers.py) next to the game folder")
+    return True
+
+
+def main():
+    a = arm_lib.Arm(speed="test")
+    enter(a)
+    banner(a)
     show(a)
     print("Type 'help' for commands.")
-
     while True:
         try:
             line = input("teach> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
-        if not line:
-            continue
-        tokens = line.split()
-        cmd = tokens[0].lower()
-
-        try:
-            if len(tokens) == 5 and all(MOTOR_TOKEN.match(t) for t in tokens):
-                move_motors(a, tokens)
-
-            elif cmd.isdigit() and len(tokens) == 2:
-                motor = int(cmd)
-                if not 1 <= motor <= 5 or not MOTOR_TOKEN.match(tokens[1]) or tokens[1] == "-":
-                    print("  use e.g. '3 -25' or '2 1800' (motors 1-5)")
-                    continue
-                five = ["-"] * 5
-                five[motor - 1] = tokens[1]
-                move_motors(a, five)
-
-            elif cmd == "edit" and len(tokens) >= 3:
-                edit_pose(a, tokens[1:])
-
-            elif cmd == "free":
-                a.release()
-                print("  arm torque OFF (gripper still on). Move the arm by hand, then 'save NAME' or 'hold'.")
-
-            elif cmd == "hold":
-                a.hold()
-                show(a)
-
-            elif cmd == "freegrip":
-                a.release_gripper()
-                print("  GRIPPER torque OFF. Move the claw by hand, then 'savegrip NAME' or 'holdgrip'.")
-                if a.holding:
-                    print(f"  (the {a.holding} may drop)")
-
-            elif cmd == "holdgrip":
-                a.hold_gripper()
-                show(a)
-
-            elif cmd == "save" and len(tokens) == 2:
-                name = tokens[1].lower()
-                if name in arm_lib.grip_names():
-                    print(f"  {name} is a gripper name. Did you mean 'savegrip {name}'?")
-                    continue
-                if name not in arm_lib.valid_pose_names():
-                    print(f"  '{name}' isn't a valid pose name. Nothing saved.")
-                    print("  " + arm_lib.POSE_NAME_HELP)
-                    continue
-                a.refresh()
-                old = a.poses["arm"].get(name)
-                a.poses["arm"][name] = list(a.current)
-                arm_lib.save_poses(a.poses)
-                print(f"  saved {name} = {a.current}" + (f"   (was {old})" if old else ""))
-                warn_limits(dict(zip(hw.ARM_JOINTS, a.current)))
-
-            elif cmd == "savegrip" and len(tokens) == 2:
-                name = tokens[1].lower()
-                if name not in arm_lib.grip_names():
-                    print("  grip names: o1 o2 o3 (open), c1 c2 c3 (closed); 1 trophy, 2 cube, 3 cylinder")
-                    continue
-                a.refresh()   # if the gripper was moved by hand, save where it really is
-                old = a.poses["grip"].get(name)
-                a.poses["grip"][name] = a.grip_pos
-                arm_lib.save_poses(a.poses)
-                print(f"  saved grip {name} = {a.grip_pos}" + (f"   (was {old})" if old is not None else ""))
-                warn_limits({hw.GRIPPER: a.grip_pos})
-
-            elif cmd == "go" and len(tokens) == 2:
-                a.go(tokens[1])
-                show(a)
-
-            elif cmd == "grip" and len(tokens) == 2:
-                a.grip(tokens[1].lower())
-
-            elif cmd == "pick" and len(tokens) == 2:
-                if a.holding:
-                    print(f"  already holding a {a.holding}; 'place C' or open the gripper first")
-                    continue
-                a.pick(int(tokens[1]))
-
-            elif cmd == "place" and len(tokens) == 2:
-                a.place(int(tokens[1]))
-
-            elif cmd == "run" and len(tokens) == 3:
-                a.pick_and_place(int(tokens[1]), int(tokens[2]))
-
-            elif cmd == "attack" and len(tokens) == 2:
-                a.attack(int(tokens[1]))
-
-            elif cmd == "sweeptest":
-                args = [t.lower() for t in tokens[1:]]
-                cells = [int(t) for t in args if t.isdigit()]
-                odd = [t for t in args if not t.isdigit() and t != "step"]
-                if odd:
-                    print("  use: sweeptest [cells...] [step]   e.g. 'sweeptest', 'sweeptest 1 5 9', 'sweeptest step'")
-                    continue
-
-                def ask(cell):
-                    ans = input(f"  cell {cell}: block is at the place pose. Enter = next, q = stop: ")
-                    return ans.strip().lower() not in ("q", "quit", "stop")
-
-                a.sweep(cells or None, ask if "step" in args else None)
-
-            elif cmd == "watch":
-                watch(a)
-
-            elif cmd == "speed" and len(tokens) == 2:
-                a.set_speed(tokens[1].lower())
-                sp = arm_lib.SPEEDS[a.speed_name]
-                print(f"  {a.speed_name} speed: travel {sp['travel']}, fine {sp['fine']}, "
-                      f"accel {sp['accel']}, grip wait {sp['grip_wait']}s")
-
-            elif cmd == "show":
-                show(a)
-
-            elif cmd == "limits":
-                for i, name in enumerate(hw.ALL_JOINTS, start=1):
-                    lo, hi = hw.JOINT_LIMITS[name]
-                    print(f"  motor {i} {name:9s} {lo:4d} - {hi:4d}")
-                print("  (edit JOINT_LIMITS in hardware.py, then restart teach mode)")
-
-            elif cmd == "list":
-                valid = set(arm_lib.valid_pose_names())
-                for name, v in sorted(a.poses["arm"].items()):
-                    note = "" if name in valid else "   (old name, never used)"
-                    print(f"  {name:20s} {' '.join(str(x) for x in v)}{note}")
-                for name, v in sorted(a.poses["grip"].items()):
-                    print(f"  grip {name:15s} {v}")
-
-            elif cmd == "missing":
-                need = [n for n in arm_lib.required_poses() if n not in a.poses["arm"]]
-                need += [f"grip:{g}" for g in arm_lib.required_grips() if g not in a.poses["grip"]]
-                print("  " + (", ".join(need) if need else "nothing, all recorded"))
-
-            elif cmd == "points" and len(tokens) == 2:
-                for i, p in enumerate(load_sequence_points(tokens[1]), start=1):
-                    values = " ".join(str(p[n]) for n in hw.ALL_JOINTS)
-                    print(f"  {i:2d}: {values}")
-
-            elif cmd == "take" and len(tokens) == 4:
-                points = load_sequence_points(tokens[1])
-                n = int(tokens[2])
-                if not 1 <= n <= len(points):
-                    print(f"  that file has points 1-{len(points)}")
-                    continue
-                p = points[n - 1]
-                name = tokens[3].lower()
-                if name not in arm_lib.valid_pose_names():
-                    print(f"  '{name}' isn't a valid pose name. Nothing saved.")
-                    print("  " + arm_lib.POSE_NAME_HELP)
-                    continue
-                a.poses["arm"][name] = [p[j] for j in hw.ARM_JOINTS]
-                arm_lib.save_poses(a.poses)
-                print(f"  saved {name} = {a.poses['arm'][name]}   (gripper in that point was {p[hw.GRIPPER]})")
-                warn_limits({j: p[j] for j in hw.ARM_JOINTS})
-
-            elif cmd == "help":
-                print(HELP)
-
-            elif cmd in ("quit", "exit", "q"):
-                break
-
-            else:
-                print("  didn't understand that, type 'help'")
-
-        except hw.StopPressed:
-            print("\n  Stopped. Arm is holding still.")
-        except KeyError as e:
-            print(f"  {e.args[0]}")
-        except (ValueError, RuntimeError) as e:
-            print(f"  {e}")
-        except ImportError:
-            print("  angle files need the course code (arm_helpers.py) next to the game folder")
-
-    if not hw.DRY_RUN:
-        print("Leaving teach mode. Torque stays " + ("OFF." if a.free else "ON (arm holding)."))
+        if line and not handle(a, line):
+            break
+    goodbye(a)
     a.close()
 
 

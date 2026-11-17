@@ -125,10 +125,17 @@ def drop_queue():
         print(f"  queued '{queued}' dropped")
 
 
-def main():
-    a = arm_lib.Arm(speed="game", track=True, blend=True)
+def enter(a):
+    """Put an open Arm into game mode: game speed, block tracking, blending allowed, queue on."""
+    a.set_speed("game")
+    a.track = True
+    if a.tracker is None:
+        a.tracker = arm_lib.BlockTracker()
+    a.allow_blend = True
     hw.typeahead.enabled = True
 
+
+def banner(a):
     if hw.DRY_RUN:
         print("=== PRACTICE MODE: motors are NOT moving ===")
     else:
@@ -137,83 +144,98 @@ def main():
     show_blocks(a)
     if a.tracker.used:
         print("  Starting a new game? Type 'reset' first.")
-    print("Type 'help' for commands.")
 
-    while True:
-        queued, partial = hw.typeahead.take()
-        if queued:
-            line = queued.strip().lower()
-            print(f"game> {line}   (from queue)")
-        else:
-            try:
-                line = ask("game> ", partial).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-        if not line:
-            continue
-        if re.fullmatch(r"\d\d", line):   # "15" = "1 5" (Space can't be typed during a move)
-            line = f"{line[0]} {line[1]}"
-        tokens = line.split()
-        cmd = tokens[0]
 
-        try:
-            if len(tokens) == 2 and tokens[0].isdigit() and tokens[1].isdigit():
-                a.pick_and_place(int(tokens[0]), int(tokens[1]))
-                show_blocks(a)
+def next_line(prompt="game> "):
+    """The next command: one typed during the last move (the queue), or a new one."""
+    queued, partial = hw.typeahead.take()
+    if queued:
+        line = queued.strip().lower()
+        print(f"{prompt}{line}   (from queue)")
+        return line
+    return ask(prompt, partial).strip().lower()
 
-            elif ATTACK.match(cmd) and len(tokens) == 1:
-                cell = int(ATTACK.match(cmd).group(1))
-                answer = input(f"  Attack c{cell}: call 'Attack', press Enter when the referee "
-                               f"authorizes (n to cancel): ").strip().lower()
-                if answer == "n":
-                    print("  cancelled")
-                    continue
-                a.attack(cell)
 
-            elif cmd in PATTERNS and len(tokens) == 1:
-                run_pattern(a, cmd)
-                show_blocks(a)
+def handle(a, line):
+    """Run one game-mode command. Returns False when the user wants to quit."""
+    line = line.strip().lower()
+    if re.fullmatch(r"\d\d", line):   # "15" = "1 5" (Space can't be typed during a move)
+        line = f"{line[0]} {line[1]}"
+    tokens = line.split()
+    cmd = tokens[0]
 
-            elif cmd == "used":
-                show_blocks(a)
-
-            elif cmd == "unuse" and len(tokens) == 2:
-                a.tracker.unmark(int(tokens[1]))
-                show_blocks(a)
-
-            elif cmd == "reset":
-                a.tracker.reset()
-                print("  new game: all blocks available")
-
-            elif cmd == "safe":
-                a.go("safe")
-
-            elif cmd == "speed" and len(tokens) == 2:
-                a.set_speed(tokens[1])
-                print(f"  {a.speed_name} speed")
-
-            elif cmd == "help":
-                print(HELP)
-
-            elif cmd in ("quit", "exit", "q"):
-                break
-
-            else:
-                print("  didn't understand that, type 'help'")
-
-        # A stop or an error also drops the queued command, so nothing moves on its own.
-        except hw.StopPressed:
-            print("\n  Stopped. Arm is holding still.")
-            drop_queue()
+    try:
+        if len(tokens) == 2 and tokens[0].isdigit() and tokens[1].isdigit():
+            a.pick_and_place(int(tokens[0]), int(tokens[1]))
             show_blocks(a)
-        except KeyError as e:
-            print(f"  {e.args[0]}")
-            drop_queue()
-        except (ValueError, RuntimeError) as e:
-            print(f"  {e}")
-            drop_queue()
 
+        elif ATTACK.match(cmd) and len(tokens) == 1:
+            cell = int(ATTACK.match(cmd).group(1))
+            answer = input(f"  Attack c{cell}: call 'Attack', press Enter when the referee "
+                           f"authorizes (n to cancel): ").strip().lower()
+            if answer == "n":
+                print("  cancelled")
+                return True
+            a.attack(cell)
+
+        elif cmd in PATTERNS and len(tokens) == 1:
+            run_pattern(a, cmd)
+            show_blocks(a)
+
+        elif cmd == "used":
+            show_blocks(a)
+
+        elif cmd == "unuse" and len(tokens) == 2:
+            a.tracker.unmark(int(tokens[1]))
+            show_blocks(a)
+
+        elif cmd == "reset":
+            a.tracker.reset()
+            print("  new game: all blocks available")
+
+        elif cmd == "safe":
+            a.go("safe")
+
+        elif cmd == "speed" and len(tokens) == 2:
+            a.set_speed(tokens[1])
+            print(f"  {a.speed_name} speed")
+
+        elif cmd == "help":
+            print(HELP)
+
+        elif cmd in ("quit", "exit", "q"):
+            return False
+
+        else:
+            print("  didn't understand that, type 'help'")
+
+    # A stop or an error also drops the queued command, so nothing moves on its own.
+    except hw.StopPressed:
+        print("\n  Stopped. Arm is holding still.")
+        drop_queue()
+        show_blocks(a)
+    except KeyError as e:
+        print(f"  {e.args[0]}")
+        drop_queue()
+    except (ValueError, RuntimeError) as e:
+        print(f"  {e}")
+        drop_queue()
+    return True
+
+
+def main():
+    a = arm_lib.Arm(speed="game", track=True, blend=True)
+    enter(a)
+    banner(a)
+    print("Type 'help' for commands.")
+    while True:
+        try:
+            line = next_line()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if line and not handle(a, line):
+            break
     a.close()
 
 
