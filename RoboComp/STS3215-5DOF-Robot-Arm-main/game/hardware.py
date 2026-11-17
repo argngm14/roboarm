@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import motion
+
 # Practice mode: True = never touch the motors, just run the logic.
 # Leave True while practising on your laptop.
 # Set to False on the Raspberry Pi.
@@ -243,6 +245,30 @@ class LiveBus:
                 return True
         return False
 
+    def coupled_move(self, names, start, goal, speed, accel, timeout):
+        """
+        Move start -> goal keeping every joint on the straight line between them
+        (see motion.py): the target never runs ahead of the slowest joint.
+        Space (or Ctrl+C) stops and holds. Call wait() afterwards to let it settle.
+        """
+        keys = _NoKeys()
+        if self.RawTerminal is not None and sys.stdin.isatty():
+            keys = self.RawTerminal()
+        with keys as term:
+            result = motion.run_coupled(
+                read=lambda: self.read(names),
+                send=self.send,
+                stop=lambda: term.read_key(0) in (" ", "\x03"),
+                names=list(names), start=start, goal=goal,
+                speed=speed, accel=accel, timeout=timeout,
+            )
+        if result == "stop":
+            self.hold(names)
+            raise StopPressed()
+        if result == "timeout":
+            self.hold(names)
+            raise RuntimeError("Move took too long, so the arm may be blocked. Stopped and holding.")
+
     def wait(self, names, timeout):
         """Wait for the move to finish. Space (or Ctrl+C) stops and holds."""
         start = time.monotonic()
@@ -351,6 +377,9 @@ class DryBus:
 
     def hold(self, names=ALL_JOINTS):
         return self.read(names)
+
+    def coupled_move(self, names, start, goal, speed, accel, timeout):
+        self.send(goal, {n: 1 for n in goal}, {n: 1 for n in goal})
 
     def wait(self, names, timeout):
         pass

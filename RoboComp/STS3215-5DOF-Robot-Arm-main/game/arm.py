@@ -69,7 +69,7 @@ CELLS = range(1, 10)
 # waits AIM_PAUSE seconds, then goes in, so grabbing and placing stay controlled.
 # Only game.py turns blending on, and only at game speed. teach.py, arm.py and
 # test speed stop at every pose with no pause, as before.
-BLEND_TICKS = 150
+BLEND_TICKS = 0     # blending is OFF (0). Corner cutting changed the path; set e.g. 150 to turn it back on.
 AIM_PAUSE = 0.2
 
 # sweeptest stops if the claw has moved more than this many ticks from where it
@@ -77,10 +77,13 @@ AIM_PAUSE = 0.2
 SWEEP_SLIP_TICKS = 80
 
 SPEEDS = {
-    "test": {"travel": 700, "fine": 180, "accel": 20, "grip_wait": 0.7, "blend": 0},   # teach mode uses this
+    "test": {"travel": 700, "fine": 180, "accel": 20, "grip_wait": 0.7, "blend": 0, "coupled": False},   # teach mode uses this
     # travel 3000 = the course's default and about the servo's top speed at 12 V (~3070).
     # accel 254 is the course default (the most aggressive); 150 is a bit gentler.
-    "game": {"travel": 3000, "fine": 1500, "accel": 150, "grip_wait": 0.5, "blend": BLEND_TICKS},
+    # coupled=True: keep the arm on a straight line in joint space at any speed, the way test
+    # speed does (see motion.py). Slows the move down if a heavy joint can't keep up.
+    # Set False to go back to plain servo profiles.
+    "game": {"travel": 3000, "fine": 1500, "accel": 150, "grip_wait": 0.5, "blend": BLEND_TICKS, "coupled": True},
 }
 GRIP_SPEED = 1500
 
@@ -301,15 +304,21 @@ class Arm:
             start = self.bus.read(hw.ARM_JOINTS)
         else:
             start = dict(zip(hw.ARM_JOINTS, self.current))
-        speeds, accs, longest = synced_profile(start, goal, speed, accel)
-        t0 = time.monotonic()
-        self.bus.send(goal, speeds, accs)
+        longest = max(abs(goal[n] - start[n]) for n in hw.ARM_JOINTS) or 1
         timeout = 3 + 2 * longest / speed
+        coupled = bool(self.sp.get("coupled")) and not blend    # coupled moves always stop at the end
+        t0 = time.monotonic()
         try:
-            if blend:
-                self.bus.wait_near(hw.ARM_JOINTS, goal, blend, timeout)
+            if coupled:
+                self.bus.coupled_move(hw.ARM_JOINTS, start, goal, speed, accel, timeout)
+                self.bus.wait(hw.ARM_JOINTS, timeout=timeout)      # let it settle on the final target
             else:
-                self.bus.wait(hw.ARM_JOINTS, timeout=timeout)
+                speeds, accs, _ = synced_profile(start, goal, speed, accel)
+                self.bus.send(goal, speeds, accs)
+                if blend:
+                    self.bus.wait_near(hw.ARM_JOINTS, goal, blend, timeout)
+                else:
+                    self.bus.wait(hw.ARM_JOINTS, timeout=timeout)
         except (hw.StopPressed, RuntimeError):
             # Stopped partway: remember where the arm actually is.
             pos = self.bus.read(hw.ARM_JOINTS)
@@ -319,7 +328,7 @@ class Arm:
         self.current = target
         self._in_flight = bool(blend)
         if TRACE:
-            print(f"      {time.monotonic() - t0:.2f}s  {'blend' if blend else 'full stop'}"
+            print(f"      {time.monotonic() - t0:.2f}s  {'blend' if blend else 'coupled' if coupled else 'full stop'}"
                   f"  ({longest} ticks, speed {speed}, accel {accel})")
 
     def set_gripper(self, position, wait=True):

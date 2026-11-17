@@ -40,8 +40,16 @@ def run_route(speed, blend):
 
 
 class BlendTests(unittest.TestCase):
-    def test_game_py_blends_only_through_safe_and_pauses_at_aim(self):
+    def test_blending_is_off_by_default(self):
+        self.assertEqual(arm_lib.BLEND_TICKS, 0)
         log, pauses = run_route("game", blend=True)
+        self.assertEqual(set(log), {"stop"})
+        self.assertEqual(pauses, [])
+
+    def test_game_py_blends_only_through_safe_and_pauses_at_aim(self):
+        # blending is switched off in the settings now; switch it on just for this test
+        with patch.dict(arm_lib.SPEEDS["game"], {"blend": 150}):
+            log, pauses = run_route("game", blend=True)
         # safe, b1_a, b1_g, b1_a, safe, c5_a, c5_p, c5_a, safe
         self.assertEqual(log, ["blend", "stop", "stop", "stop", "blend",
                                "stop", "stop", "stop", "stop"])
