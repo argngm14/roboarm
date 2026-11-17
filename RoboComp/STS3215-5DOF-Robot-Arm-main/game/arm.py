@@ -98,9 +98,9 @@ GRIP_SPEED = 1500
 #   ROBOARM_TRACE=1 python3 game.py
 TRACE = os.environ.get("ROBOARM_TRACE") == "1"
 
-# During an attack the empty gripper closes to this saved grip first, so it goes
-# into the cell the same width as when it carried that block in. c2 = cube.
-ATTACK_GRIP = "c2"
+# During an attack (knock) the empty gripper first closes to this raw position.
+# 3000 = fully closed (the gripper's limit in hardware.py).
+ATTACK_GRIP = 3000
 
 # Practice runs save to a separate file, so made-up numbers never reach the real arm.
 _POSE_NAME = "poses_dryrun.json" if hw.DRY_RUN else "poses.json"
@@ -561,10 +561,11 @@ class Arm:
             raise KeyError(f"Cell must be 1-9, not {cell}")
         aim = f"c{cell}_a"
         knock = f"c{cell}_k" if f"c{cell}_k" in self.poses["arm"] else f"c{cell}_p"
-        self.check(["safe", aim, knock], [ATTACK_GRIP])
+        self.check(["safe", aim, knock])
         print(f"attack cell {cell} via {knock}   [{self.speed_name} speed, Space = stop]")
         self.go("safe", "travel")
-        self.grip(ATTACK_GRIP)
+        print(f"  gripper {ATTACK_GRIP} (closed for the knock)")
+        self.set_gripper(ATTACK_GRIP)
         self.holding = None            # closed, but nothing in it
         self.go(aim, "travel")                         # full stop at aim, then a short pause
         self.aim_pause()
